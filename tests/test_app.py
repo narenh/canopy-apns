@@ -1,0 +1,333 @@
+"""The relay's endpoints, end to end over ASGI with APNs mocked."""
+
+from __future__ import annotations
+
+import json
+
+import httpx
+import respx
+from asgi_lifespan import LifespanManager
+from httpx import ASGITransport, AsyncClient
+
+from canopy_apns.apns import PRODUCTION_HOST, SANDBOX_HOST
+from canopy_apns.app import create_app
+from canopy_apns.config import ApnsCredentials, Settings
+from canopy_apns.keys import mint
+
+from .conftest import BUNDLE_ID, DEVICE_TOKEN, INSTANCE_ID, SIGNING_SECRET
+
+PUSH = {"device_token": DEVICE_TOKEN, "title": "The End of Oak Street (2026)"}
+
+
+def _apns_route(host: str = PRODUCTION_HOST, token: str = DEVICE_TOKEN):
+    return respx.post(f"{host}/3/device/{token}")
+
+
+# ---------------------------------------------------------------------------
+# Health and discovery
+# ---------------------------------------------------------------------------
+
+
+async def test_health_is_open_and_reports_readiness(client: AsyncClient) -> None:
+    response = await client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "apns": "configured"}
+
+
+async def test_health_says_so_when_no_signing_key_is_set(
+    unconfigured_client: AsyncClient,
+) -> None:
+    response = await unconfigured_client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["apns"] == "unconfigured"
+
+
+async def test_the_root_explains_itself_rather_than_404ing(client: AsyncClient) -> None:
+    response = await client.get("/")
+    assert response.status_code == 200
+    assert response.json()["service"] == "canopy-apns"
+
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+
+async def test_a_push_without_a_key_is_refused(client: AsyncClient) -> None:
+    response = await client.post("/v1/push", json=PUSH)
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+async def test_a_forged_key_is_refused(client: AsyncClient) -> None:
+    forged = mint(INSTANCE_ID, secret="not-the-relays-secret")
+    response = await client.post(
+        "/v1/push", json=PUSH, headers={"Authorization": f"Bearer {forged}"}
+    )
+    assert response.status_code == 401
+
+
+async def test_a_non_bearer_scheme_is_refused(
+    client: AsyncClient, api_key: str
+) -> None:
+    response = await client.post(
+        "/v1/push", json=PUSH, headers={"Authorization": f"Basic {api_key}"}
+    )
+    assert response.status_code == 401
+
+
+async def test_every_refusal_reads_the_same(client: AsyncClient) -> None:
+    """A prober must not learn whether an instance id exists or a key was close."""
+    forged = mint(INSTANCE_ID, secret="wrong")
+    malformed = await client.post(
+        "/v1/push", json=PUSH, headers={"Authorization": "Bearer nonsense"}
+    )
+    bad_signature = await client.post(
+        "/v1/push", json=PUSH, headers={"Authorization": f"Bearer {forged}"}
+    )
+    assert malformed.json() == bad_signature.json()
+
+
+async def test_a_revoked_instance_is_refused_despite_a_valid_signature() -> None:
+    """Per-instance revocation, without punishing everyone else with a rotation."""
+    settings = Settings(
+        apns=None,
+        signing_secret=SIGNING_SECRET,
+        revoked_instances=frozenset({INSTANCE_ID}),
+    )
+    app = create_app(settings=settings)
+    key = mint(INSTANCE_ID, secret=SIGNING_SECRET)
+
+    async with LifespanManager(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://relay"
+        ) as client:
+            response = await client.get(
+                "/v1/verify", headers={"Authorization": f"Bearer {key}"}
+            )
+
+    assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Verify
+# ---------------------------------------------------------------------------
+
+
+async def test_verify_reports_the_instance_and_the_topic(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    response = await client.get("/v1/verify", headers=auth)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["instance"] == INSTANCE_ID
+    assert body["bundle_id"] == BUNDLE_ID
+    assert body["ready"] is True
+
+
+async def test_verify_separates_a_good_key_from_an_unready_relay(
+    unconfigured_client: AsyncClient, auth: dict[str, str]
+) -> None:
+    """Two different failures with two different owners; 401 vs ready:false."""
+    response = await unconfigured_client.get("/v1/verify", headers=auth)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "instance": INSTANCE_ID,
+        "bundle_id": None,
+        "ready": False,
+        "rate_limit_per_minute": 120,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pushing
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_a_push_is_forwarded_to_apple(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    route = _apns_route().mock(
+        return_value=httpx.Response(200, headers={"apns-id": "abc-123"})
+    )
+
+    response = await client.post(
+        "/v1/push",
+        json={**PUSH, "subtitle": "Requested by Robin Example", "data": {"imdb_id": "tt1"}},
+        headers=auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "result": "delivered",
+        "reason": None,
+        "apns_id": "abc-123",
+    }
+
+    payload = json.loads(route.calls[0].request.read())
+    assert payload["aps"]["alert"] == {
+        "title": PUSH["title"],
+        "subtitle": "Requested by Robin Example",
+    }
+    assert payload["canopy"] == {"imdb_id": "tt1"}
+
+
+@respx.mock
+async def test_a_sandbox_push_goes_to_the_sandbox_host(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    route = _apns_route(SANDBOX_HOST).mock(return_value=httpx.Response(200))
+
+    response = await client.post(
+        "/v1/push", json={**PUSH, "environment": "sandbox"}, headers=auth
+    )
+
+    assert response.json()["result"] == "delivered"
+    assert route.called
+
+
+@respx.mock
+async def test_a_dead_token_comes_back_as_200_unregistered(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    """The relay stores no tokens, so only the instance can delete one.
+
+    Burying that answer in a 5xx alongside genuine faults is how an instance
+    ends up keeping tokens Apple stopped accepting months ago.
+    """
+    _apns_route().mock(return_value=httpx.Response(410, json={"reason": "Unregistered"}))
+
+    response = await client.post("/v1/push", json=PUSH, headers=auth)
+
+    assert response.status_code == 200
+    assert response.json()["result"] == "unregistered"
+    assert response.json()["reason"] == "Unregistered"
+
+
+@respx.mock
+async def test_apple_refusing_is_still_a_successful_forward(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    _apns_route().mock(return_value=httpx.Response(400, json={"reason": "BadTopic"}))
+
+    response = await client.post("/v1/push", json=PUSH, headers=auth)
+
+    assert response.status_code == 200
+    assert response.json()["result"] == "failed"
+    assert response.json()["reason"] == "BadTopic"
+
+
+async def test_a_push_to_an_unconfigured_relay_is_a_503(
+    unconfigured_client: AsyncClient, auth: dict[str, str]
+) -> None:
+    response = await unconfigured_client.post("/v1/push", json=PUSH, headers=auth)
+
+    assert response.status_code == 503
+    assert "API key" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Payload constraints
+# ---------------------------------------------------------------------------
+
+
+async def test_an_instance_cannot_set_aps_fields_itself(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    """`content-available` under the operator's signing key is not on offer."""
+    response = await client.post(
+        "/v1/push",
+        json={**PUSH, "aps": {"content-available": 1}},
+        headers=auth,
+    )
+    assert response.status_code == 422
+
+
+async def test_a_non_hex_device_token_is_refused(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    response = await client.post(
+        "/v1/push", json={**PUSH, "device_token": "not-hex"}, headers=auth
+    )
+    assert response.status_code == 422
+
+
+async def test_an_empty_title_is_refused(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    response = await client.post("/v1/push", json={**PUSH, "title": ""}, headers=auth)
+    assert response.status_code == 422
+
+
+async def test_an_oversized_data_blob_is_refused(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    """The relay is not a general-purpose message bus, and APNs caps at 4KB."""
+    response = await client.post(
+        "/v1/push", json={**PUSH, "data": {"blob": "x" * 2000}}, headers=auth
+    )
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_an_instance_over_its_limit_gets_a_429_with_retry_after(
+    credentials: ApnsCredentials,
+) -> None:
+    _apns_route().mock(return_value=httpx.Response(200))
+    settings = Settings(
+        apns=credentials,
+        signing_secret=SIGNING_SECRET,
+        rate_limit_per_minute=60,
+        rate_burst=2,
+    )
+    app = create_app(settings=settings)
+    headers = {"Authorization": f"Bearer {mint(INSTANCE_ID, secret=SIGNING_SECRET)}"}
+
+    async with LifespanManager(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://relay"
+        ) as client:
+            statuses = [
+                (await client.post("/v1/push", json=PUSH, headers=headers)).status_code
+                for _ in range(3)
+            ]
+            refused = await client.post("/v1/push", json=PUSH, headers=headers)
+
+    assert statuses == [200, 200, 429]
+    assert int(refused.headers["retry-after"]) >= 1
+
+
+@respx.mock
+async def test_verify_does_not_spend_the_push_budget(
+    credentials: ApnsCredentials,
+) -> None:
+    """A settings page that costs an admin their notification budget is a bad one."""
+    _apns_route().mock(return_value=httpx.Response(200))
+    settings = Settings(
+        apns=credentials,
+        signing_secret=SIGNING_SECRET,
+        rate_limit_per_minute=60,
+        rate_burst=1,
+    )
+    app = create_app(settings=settings)
+    headers = {"Authorization": f"Bearer {mint(INSTANCE_ID, secret=SIGNING_SECRET)}"}
+
+    async with LifespanManager(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://relay"
+        ) as client:
+            for _ in range(5):
+                assert (await client.get("/v1/verify", headers=headers)).status_code == 200
+            pushed = await client.post("/v1/push", json=PUSH, headers=headers)
+
+    assert pushed.status_code == 200

@@ -1,0 +1,128 @@
+"""The relay's wire contract.
+
+Small on purpose.  An instance sends a device token, two lines of text and an
+opaque blob; it gets back one word saying what became of it.
+
+``extra="forbid"`` throughout: a field an instance thinks it is sending and the
+relay is silently ignoring is the worst kind of bug to have between two
+separately-deployed services, so an unrecognised key is a 422 with its name in
+it rather than a push that quietly did something else.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .config import MAX_DATA_BYTES, MAX_SUBTITLE_LENGTH, MAX_TITLE_LENGTH
+
+
+class PushRequest(BaseModel):
+    """``POST /v1/push`` — one notification for one device.
+
+    Deliberately *not* an APNs payload.  An instance cannot set ``aps`` fields
+    directly, because ``content-available`` and ``mutable-content`` are how a
+    push becomes a silent background wake, and the relay operator's signing key
+    is what would be authorising it.  Text in, alert out; see
+    :func:`canopy_apns.apns.build_payload`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    device_token: str = Field(min_length=1, max_length=200, pattern=r"^[0-9a-fA-F]+$")
+    """Hex, as Apple issues it. The relay never stores this — it is a
+    parameter of the forward and is gone when the request ends."""
+
+    environment: Literal["sandbox", "production"] = "production"
+    """A property of the token, not a preference: a token minted by a
+    development build only works against Apple's sandbox host. The instance
+    knows which its app is; the relay has no way to tell by looking."""
+
+    title: str = Field(min_length=1, max_length=MAX_TITLE_LENGTH)
+    subtitle: str | None = Field(default=None, max_length=MAX_SUBTITLE_LENGTH)
+
+    data: dict[str, Any] | None = None
+    """Opaque to the relay, forwarded under a ``canopy`` key for the app to
+    read on tap. Size-capped so it cannot push the notification past Apple's
+    4KB limit or turn the relay into a general-purpose message bus."""
+
+    collapse_id: str | None = Field(default=None, max_length=64)
+    """Apple replaces an undelivered notification with a later one carrying the
+    same collapse id. Optional, and meaningful only to the instance."""
+
+    @field_validator("data")
+    @classmethod
+    def _data_fits(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        try:
+            encoded = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("data must be JSON-serialisable") from exc
+        if len(encoded) > MAX_DATA_BYTES:
+            raise ValueError(
+                f"data is {len(encoded)} bytes; the limit is {MAX_DATA_BYTES}"
+            )
+        return value
+
+
+class PushResponse(BaseModel):
+    """What became of one push.
+
+    ``unregistered`` is the field this endpoint exists to return honestly: the
+    relay stores no device tokens, so only the instance can act on a dead one,
+    and it can only do that if it is told.
+    """
+
+    result: Literal["delivered", "unregistered", "failed"]
+    reason: str | None = None
+    """Apple's machine-readable reason, when they gave one. For the instance's
+    log; nothing should branch on it beyond ``result``."""
+
+    apns_id: str | None = None
+    """Apple's id for the push, for correlating with their delivery console."""
+
+
+class VerifyResponse(BaseModel):
+    """``GET /v1/verify`` — what an instance's admin page needs to show.
+
+    Answers "is my key good and is this relay actually able to send", which are
+    two different failures with two different fixes and are worth separating
+    before anyone goes looking for a lost notification.
+    """
+
+    ok: bool
+    instance: str
+    bundle_id: str | None = None
+    """The topic this relay pushes to. An instance whose app has a different
+    bundle id would get every push rejected by Apple, so it is worth showing."""
+
+    ready: bool = True
+    """False when the relay authenticated the key but has no signing key of its
+    own — the instance is set up correctly and the relay is not."""
+
+    rate_limit_per_minute: int = 0
+
+
+class HealthResponse(BaseModel):
+    """``GET /health`` — unauthenticated, and says nothing an attacker wants."""
+
+    status: Literal["ok"] = "ok"
+    apns: Literal["configured", "unconfigured"]
+
+
+class ErrorResponse(BaseModel):
+    """The body of every non-2xx the relay produces itself."""
+
+    detail: str
+
+
+__all__ = [
+    "ErrorResponse",
+    "HealthResponse",
+    "PushRequest",
+    "PushResponse",
+    "VerifyResponse",
+]

@@ -1,0 +1,70 @@
+# Deployment for Coolify (Docker Compose resource).
+#
+# No `image:` line: nothing is published to a registry, so Coolify builds from
+# this repo. No `ports:` either — see the note on `expose` below.
+#
+# Everything secret is a Coolify environment variable. Mark CANOPY_APNS_PRIVATE_KEY
+# and CANOPY_APNS_SIGNING_SECRET as build-time-hidden secrets there; neither
+# should ever appear in this file, in the repo, or in a build log.
+
+services:
+  canopy-apns:
+    build: .
+    restart: unless-stopped
+
+    environment:
+      # Coolify replaces this with the domain you assign (notifications.canopysf.com)
+      # and wires up its proxy and TLS certificate. The port belongs in the
+      # variable NAME — `SERVICE_FQDN_<IDENTIFIER>_<PORT>` — and the value is
+      # the path to route. Outside Coolify it is simply unset; the app never
+      # reads it.
+      SERVICE_FQDN_CANOPYAPNS_8080: /
+
+      CANOPY_APNS_HOST: 0.0.0.0
+      CANOPY_APNS_PORT: "8080"
+      CANOPY_APNS_LOG_LEVEL: info
+      TZ: UTC
+
+      # --- Set these in Coolify, not here. ------------------------------------
+      # Every instance API key is an HMAC over its instance id using this
+      # secret. Generate once with `python -m canopy_apns secret`. Rotating it
+      # invalidates every key ever issued, which is the break-glass revocation.
+      CANOPY_APNS_SIGNING_SECRET: ${CANOPY_APNS_SIGNING_SECRET:?set this in Coolify}
+
+      # The Apple Developer team that owns the push key, the key's own id, and
+      # the app's bundle id (sent as the APNs topic — Apple rejects a push whose
+      # topic does not match the app the device token came from).
+      CANOPY_APNS_TEAM_ID: ${CANOPY_APNS_TEAM_ID:-}
+      CANOPY_APNS_KEY_ID: ${CANOPY_APNS_KEY_ID:-}
+      CANOPY_APNS_BUNDLE_ID: ${CANOPY_APNS_BUNDLE_ID:-}
+
+      # The .p8 itself. Coolify's variable editor is happier with one line, so
+      # the service accepts the PEM verbatim, the PEM with literal \n escapes,
+      # or base64 of the whole file — whichever survived the paste.
+      CANOPY_APNS_PRIVATE_KEY: ${CANOPY_APNS_PRIVATE_KEY:-}
+
+      # Comma-separated instance ids to refuse despite a valid signature. This
+      # is per-instance revocation; leave empty until you need it.
+      CANOPY_APNS_REVOKED_INSTANCES: ${CANOPY_APNS_REVOKED_INSTANCES:-}
+
+      # Per-instance ceiling, so one misconfigured instance cannot spend the
+      # operator's standing with Apple. Counted per replica, in memory.
+      CANOPY_APNS_RATE_LIMIT: ${CANOPY_APNS_RATE_LIMIT:-120}
+      CANOPY_APNS_RATE_BURST: ${CANOPY_APNS_RATE_BURST:-30}
+
+    # `expose`, not `ports`. Coolify's proxy reaches the container over the
+    # Docker network, so publishing a host port is both unnecessary and
+    # actively harmful: it binds 0.0.0.0:8080 on the host, which fails outright
+    # if anything else already holds that port, and otherwise leaves the
+    # service reachable bypassing the proxy and its TLS.
+    expose:
+      - "8080"
+
+    # No `volumes:`. The relay is stateless by construction — see the README.
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ['CANOPY_APNS_PORT']+'/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
