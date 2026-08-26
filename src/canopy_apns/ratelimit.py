@@ -46,10 +46,20 @@ class RateLimiter:
     fresh one per app and two apps in one process cannot interfere.
     """
 
-    def __init__(self, *, per_minute: int, burst: int) -> None:
+    def __init__(self, *, per_minute: float, burst: int) -> None:
         self._rate_per_second = per_minute / 60.0
         self._capacity = float(burst)
         self._buckets: dict[str, _Bucket] = {}
+
+    @classmethod
+    def per_hour(cls, rate: float, *, burst: int) -> RateLimiter:
+        """A limiter expressed in requests per hour rather than per minute.
+
+        Enrollment is the caller: a real instance enrolls once in its life, so
+        its natural unit is hours and writing ``per_minute=10 / 60`` at the call
+        site would only invite someone to "simplify" it to ``10``.
+        """
+        return cls(per_minute=rate / 60.0, burst=burst)
 
     def check(self, instance_id: str, *, now: float | None = None) -> Decision:
         """Spend one token for ``instance_id``, or refuse.

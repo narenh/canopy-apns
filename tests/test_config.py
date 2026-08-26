@@ -119,3 +119,37 @@ def test_a_nonsense_rate_limit_is_a_startup_error(
     monkeypatch.setenv("CANOPY_APNS_RATE_LIMIT", "lots")
     with pytest.raises(ConfigError):
         load_settings()
+
+
+def test_enrollment_is_on_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An admin ticking a checkbox must not have to think about API keys."""
+    monkeypatch.setenv("CANOPY_APNS_SIGNING_SECRET", "s3cret")
+    monkeypatch.delenv("CANOPY_APNS_ENROLLMENT_ENABLED", raising=False)
+
+    assert load_settings().enrollment_enabled is True
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("false", False), ("no", False), ("0", False), ("off", False),
+     ("true", True), ("yes", True), ("1", True), ("on", True)],
+)
+def test_enrollment_flag_accepts_what_people_actually_write(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    """Someone writing `no` where the docs said `false` should get what they meant."""
+    monkeypatch.setenv("CANOPY_APNS_SIGNING_SECRET", "s3cret")
+    monkeypatch.setenv("CANOPY_APNS_ENROLLMENT_ENABLED", value)
+
+    assert load_settings().enrollment_enabled is expected
+
+
+def test_a_nonsense_enrollment_flag_is_a_startup_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Silently picking a default would be picking a security posture by accident."""
+    monkeypatch.setenv("CANOPY_APNS_SIGNING_SECRET", "s3cret")
+    monkeypatch.setenv("CANOPY_APNS_ENROLLMENT_ENABLED", "sometimes")
+
+    with pytest.raises(ConfigError):
+        load_settings()

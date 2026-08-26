@@ -17,7 +17,7 @@ It stores nothing. No database, no volume, no queue, no device tokens.
 - [The isolation model](#the-isolation-model)
 - [What the relay does and does not do](#what-the-relay-does-and-does-not-do)
 - [API](#api)
-- [Instance API keys](#instance-api-keys)
+- [Instance API keys](#instance-api-keys) — including self-service enrollment
 - [Configuration](#configuration)
 - [Deploying on Coolify](#deploying-on-coolify)
 - [Privacy: what the relay operator can see](#privacy-what-the-relay-operator-can-see)
@@ -28,7 +28,7 @@ It stores nothing. No database, no volume, no queue, no device tokens.
 ## The isolation model
 
 The question this service has to answer is: if `cplus.notcanopy.com` and
-`cplus.canopysf.com` both push through `notifications.canopysf.com`, what stops
+`cplus.canopysf.com` both push through `apns.canopysf.com`, what stops
 one of them notifying the other's users?
 
 **Token custody. Not the relay.**
@@ -67,7 +67,7 @@ Two consequences worth stating plainly:
               └────────────────┬──────────────────┘
                                ▼
                  ┌─────────────────────────────┐
-                 │ notifications.canopysf.com  │  holds the .p8
+                 │     apns.canopysf.com       │  holds the .p8
                  │ stores: nothing             │  remembers: nothing
                  └──────────────┬──────────────┘
                                 ▼
@@ -85,6 +85,8 @@ mechanism.
 
 - Holds the APNs signing key (`.p8`), team id, key id and bundle id, from the
   environment.
+- Issues instance identities on demand, so no self-hoster ever handles a
+  credential. Still writes nothing down.
 - Authenticates each request by instance API key, and rate-limits per instance.
 - Builds the APNs payload itself from a constrained request shape, and sets the
   push headers.
@@ -94,7 +96,8 @@ mechanism.
 
 **Does not**
 
-- Store device tokens, notification text, or any device→instance mapping.
+- Store device tokens, notification text, any device→instance mapping, or the
+  keys it issues. Enrollment computes a key and forgets it.
 - Accept a raw `aps` dictionary. An instance sends text; the relay decides the
   payload shape. Otherwise any instance could send a silent
   `content-available` background wake signed with the operator's key.
@@ -110,11 +113,12 @@ mechanism.
 
 ## API
 
-Base URL in production: `https://notifications.canopysf.com`.
+Base URL in production: `https://apns.canopysf.com`.
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
 | `GET /health` | none | Liveness, plus whether a signing key is configured |
+| `POST /v1/instances` | none | Self-service enrollment: issues an instance id and API key |
 | `GET /v1/verify` | Bearer | Confirm a key works; for an instance's settings page |
 | `POST /v1/push` | Bearer | Forward one notification to one device |
 | `GET /` | none | Says what this is; there is no web UI |
@@ -203,39 +207,82 @@ canopy_<instance-id>_<base32 HMAC-SHA256 over the id, truncated to 128 bits>
 The relay verifies by recomputing the signature from
 `CANOPY_APNS_SIGNING_SECRET`. That is what lets the service be genuinely
 stateless — nothing to back up, nothing to migrate, and two replicas that
-cannot disagree about who is allowed in.
+cannot disagree about who is allowed in. It is also what makes self-service
+enrollment possible without a database.
 
-**Issuing a key:**
+### Instances enrol themselves
 
 ```console
-$ python -m canopy_apns mint notcanopy
-canopy_notcanopy_k3jd7q2mfhx4zt8bwv6nra5cyp
+$ curl -X POST https://apns.canopysf.com/v1/instances
+{"instance_id":"tpg6b7n6uwtjiaqzmerq",
+ "api_key":"canopy_tpg6b7n6uwtjiaqzmerq_ifjxemuuqtg5a7g6opkbz3je5q",
+ "bundle_id":"com.example.canopy","ready":true}
 ```
 
-Nothing is written anywhere. Send that string to whoever asked and forget it.
-Minting is deterministic, so an admin who lost their key can be handed the same
-one again rather than a replacement.
+No auth, no request body, nothing stored. The relay invents a random id, derives
+its key, and forgets both. There is nothing an enrolling instance could tell the
+relay that the relay could verify, so it is not asked.
 
-This is a local command on purpose. An HTTP endpoint that hands out keys hands
-them out to anyone who finds it, and a rate limit per key means nothing if keys
-are free.
+**This is not recoverable.** There is nowhere the key was written down. A caller
+that loses one enrols again and gets a new identity; the old id simply stops
+being used.
 
-**Instance ids** are 1–63 characters of lowercase letters, digits and internal
+`cplus-server` calls this the moment an admin ticks *Enable notifications*, so
+no self-hoster ever sees or handles a credential.
+
+### The trade this makes
+
+Handing out keys for free weakens what a per-key rate limit is worth: anyone
+refused can enrol again and get a fresh bucket. That is a real cost and it was
+accepted deliberately, because the alternative — every admin obtaining a key out
+of band and pasting it into a form — put a credential in front of people whose
+actual intent was "I would like notifications", and required a human in the loop
+for every single one.
+
+What holds the line instead:
+
+| Control | What it stops |
+|---|---|
+| `CANOPY_APNS_ENROLLMENT_PER_HOUR` / `_BURST` | Bulk minting from one source address |
+| `CANOPY_APNS_RATE_LIMIT` / `_BURST` | One instance flooding Apple |
+| `CANOPY_APNS_REVOKED_INSTANCES` | A specific instance behaving badly |
+| `CANOPY_APNS_ENROLLMENT_ENABLED=false` | Enrollment entirely, if it is ever abused |
+
+Turning enrollment off does not disturb instances already holding a key.
+
+Per-address limiting needs the app to see the real client rather than the proxy
+in front of it, so uvicorn is run with proxy headers trusted and
+`CANOPY_APNS_FORWARDED_ALLOW_IPS` defaults to `*`. That is correct while the
+container is only reachable through Coolify's proxy — which `expose` (rather
+than `ports`) ensures. If you ever publish the port directly, narrow it to the
+proxy's address, or a client can claim any address it likes and get a fresh
+bucket per request.
+
+### Issuing one by hand
+
+Still supported, for a stable id you choose:
+
+```console
+$ python -m canopy_apns mint acme
+canopy_acme_k3jd7q2mfhx4zt8bwv6nra5cyp
+```
+
+Deterministic, so an admin who lost their key can be handed the same one again.
+Hand-chosen ids are 1–63 characters of lowercase letters, digits and internal
 hyphens. No underscores — that separates the fields, so a key always splits into
 exactly three parts. The id is legible in the key by design: it is what logs and
 rate-limit buckets are keyed on, and a key in a bug report can be attributed
 without a lookup. The id is an identifier; the signature is the secret part.
 
-**Revoking:**
+### Revoking
 
 | Scope | How | Effect |
 |---|---|---|
 | One instance | Add its id to `CANOPY_APNS_REVOKED_INSTANCES` | That key 401s; everyone else unaffected |
-| Everything | Rotate `CANOPY_APNS_SIGNING_SECRET` | Every key ever issued 401s; re-mint and re-distribute |
+| Everything | Rotate `CANOPY_APNS_SIGNING_SECRET` | Every key ever issued 401s; instances re-enrol |
 
-Both are redeploys. A derived key cannot be un-derived, which is the cost of
-having no persistence; for a service that hands out keys by hand, it is a good
-trade.
+Both are redeploys. A derived key cannot be un-derived, which is the price of
+having no persistence at all.
 
 ---
 
@@ -255,6 +302,10 @@ because there is no storage for either to write to.
 | `CANOPY_APNS_REVOKED_INSTANCES` | — | empty | Comma-separated instance ids to refuse |
 | `CANOPY_APNS_RATE_LIMIT` | — | `120` | Pushes per minute per instance |
 | `CANOPY_APNS_RATE_BURST` | — | `30` | Bucket capacity, i.e. how large a burst is tolerated |
+| `CANOPY_APNS_ENROLLMENT_ENABLED` | — | `true` | Whether `POST /v1/instances` issues keys |
+| `CANOPY_APNS_ENROLLMENT_PER_HOUR` | — | `10` | Enrollments per hour per source address |
+| `CANOPY_APNS_ENROLLMENT_BURST` | — | `5` | How many may be bunched together |
+| `CANOPY_APNS_FORWARDED_ALLOW_IPS` | — | `*` | Whose `X-Forwarded-For` to trust when identifying the client |
 | `CANOPY_APNS_HOST` | — | `0.0.0.0` | Bind address |
 | `CANOPY_APNS_PORT` | — | `9247` | Bind port |
 | `CANOPY_APNS_LOG_LEVEL` | — | `info` | uvicorn log level |
@@ -299,7 +350,7 @@ Buckets for instances that have gone quiet are dropped after an hour of idleness
 
 1. **New resource → Docker Compose**, pointed at this repository. `build: .` is
    already in `docker-compose.yml`; nothing is published to a registry.
-2. **Assign the domain** `notifications.canopysf.com`. Coolify fills in
+2. **Assign the domain** `apns.canopysf.com`. Coolify fills in
    `SERVICE_FQDN_CANOPYAPNS_8080` and wires up its proxy and TLS certificate.
    The compose file uses `expose`, not `ports`, so the container is reachable
    only through that proxy.
@@ -316,15 +367,11 @@ Buckets for instances that have gone quiet are dropped after an hour of idleness
    `unconfigured`, one of the four APNs variables is missing or blank — the
    service treats three-out-of-four as not configured, deliberately, because
    three cannot send anything.
-5. **Mint a key per instance** as people ask for one:
-
-   ```console
-   $ docker exec <container> python -m canopy_apns mint notcanopy
-   ```
-
-   Or run `python -m canopy_apns mint <id>` anywhere with the same
-   `CANOPY_APNS_SIGNING_SECRET` in the environment — the key is derived, so it
-   does not have to be minted on the host that serves it.
+5. **Nothing else.** Instances enrol themselves through `POST /v1/instances`
+   the moment their admin switches notifications on. Use
+   `python -m canopy_apns mint <id>` only if you want to hand someone a stable
+   id of their own; it works anywhere the same `CANOPY_APNS_SIGNING_SECRET` is
+   set, since the key is derived rather than looked up.
 
 There is **no volume and no `/data`**. If a redeploy loses something, it was not
 this service's.
