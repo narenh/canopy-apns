@@ -39,8 +39,25 @@ def _serve() -> int:
     host = os.environ.get("CANOPY_APNS_HOST", "0.0.0.0")  # noqa: S104 - containerised
     port = int(os.environ.get("CANOPY_APNS_PORT", "9247"))
     log_level = os.environ.get("CANOPY_APNS_LOG_LEVEL", "info")
+    # Enrollment is rate-limited per source address, so the app has to see the
+    # real client rather than the proxy in front of it. Letting uvicorn apply
+    # `X-Forwarded-For` means `request.client.host` is already correct and no
+    # endpoint has to parse a header it could get wrong.
+    #
+    # `*` trusts whatever sent the header, which is right behind a proxy that
+    # overwrites it and wrong if the port is reachable directly — a client
+    # could then claim any address it liked and get a fresh bucket per request.
+    # Narrow it to the proxy's address if this is ever exposed unproxied.
+    forwarded_allow_ips = os.environ.get("CANOPY_APNS_FORWARDED_ALLOW_IPS", "*")
 
-    uvicorn.run(create_app(), host=host, port=port, log_level=log_level)
+    uvicorn.run(
+        create_app(),
+        host=host,
+        port=port,
+        log_level=log_level,
+        proxy_headers=True,
+        forwarded_allow_ips=forwarded_allow_ips,
+    )
     return 0
 
 

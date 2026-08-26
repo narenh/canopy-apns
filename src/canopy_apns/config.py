@@ -26,6 +26,14 @@ from dataclasses import dataclass, field
 DEFAULT_RATE_LIMIT_PER_MINUTE = 120
 DEFAULT_RATE_BURST = 30
 
+#: Enrollments one source address may make per hour, and how many may be
+#: bunched together.  Deliberately generous for a real deployment (an instance
+#: enrolls once, ever) and deliberately finite, because self-service keys are
+#: free and this is the only thing standing between that and someone minting
+#: ten thousand of them.
+DEFAULT_ENROLLMENT_PER_HOUR = 10
+DEFAULT_ENROLLMENT_BURST = 5
+
 #: Longest payload strings the relay will forward.  APNs caps the whole
 #: notification at 4KB; these keep any one field from eating it, and keep the
 #: relay from being used as a general-purpose message bus.
@@ -44,6 +52,26 @@ class ConfigError(Exception):
 
 def _clean(name: str) -> str:
     return (os.environ.get(name) or "").strip()
+
+
+def _flag(name: str, *, default: bool) -> bool:
+    """A boolean environment variable, read forgivingly.
+
+    Anything recognisably negative turns it off; anything recognisably positive
+    turns it on; an unset or unrecognised value leaves the default alone. An
+    operator who writes ``no`` where the docs said ``false`` should get what
+    they meant, not silently the opposite.
+    """
+    raw = _clean(name).lower()
+    if not raw:
+        return default
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    raise ConfigError(
+        f"{name} must be true or false, got {raw!r}"
+    )
 
 
 def _int(name: str, default: int) -> int:
@@ -160,6 +188,18 @@ class Settings:
     rate_limit_per_minute: int = DEFAULT_RATE_LIMIT_PER_MINUTE
     rate_burst: int = DEFAULT_RATE_BURST
 
+    enrollment_enabled: bool = True
+    """Whether ``POST /v1/instances`` will issue new keys.
+
+    On by default — an instance admin ticking a checkbox must not have to think
+    about API keys, which is the whole point of the endpoint.  It is a switch
+    rather than a constant so that an operator watching enrollment abuse can
+    shut the door in one redeploy without taking notifications away from every
+    instance already running."""
+
+    enrollment_per_hour: int = DEFAULT_ENROLLMENT_PER_HOUR
+    enrollment_burst: int = DEFAULT_ENROLLMENT_BURST
+
     apns_timeout_seconds: float = 10.0
 
     extra: dict[str, str] = field(default_factory=dict)
@@ -202,10 +242,19 @@ def load_settings() -> Settings:
         revoked_instances=frozenset(revoked),
         rate_limit_per_minute=_int("CANOPY_APNS_RATE_LIMIT", DEFAULT_RATE_LIMIT_PER_MINUTE),
         rate_burst=_int("CANOPY_APNS_RATE_BURST", DEFAULT_RATE_BURST),
+        enrollment_enabled=_flag("CANOPY_APNS_ENROLLMENT_ENABLED", default=True),
+        enrollment_per_hour=_int(
+            "CANOPY_APNS_ENROLLMENT_PER_HOUR", DEFAULT_ENROLLMENT_PER_HOUR
+        ),
+        enrollment_burst=_int(
+            "CANOPY_APNS_ENROLLMENT_BURST", DEFAULT_ENROLLMENT_BURST
+        ),
     )
 
 
 __all__ = [
+    "DEFAULT_ENROLLMENT_BURST",
+    "DEFAULT_ENROLLMENT_PER_HOUR",
     "DEFAULT_RATE_BURST",
     "DEFAULT_RATE_LIMIT_PER_MINUTE",
     "MAX_DATA_BYTES",

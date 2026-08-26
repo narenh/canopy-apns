@@ -13,7 +13,7 @@ services:
     restart: unless-stopped
 
     environment:
-      # Coolify replaces this with the domain you assign (notifications.canopysf.com)
+      # Coolify replaces this with the domain you assign (apns.canopysf.com)
       # and wires up its proxy and TLS certificate. The port belongs in the
       # variable NAME — `SERVICE_FQDN_<IDENTIFIER>_<PORT>` — and the value is
       # the path to route. Outside Coolify it is simply unset; the app never
@@ -51,6 +51,22 @@ services:
       # operator's standing with Apple. Counted per replica, in memory.
       CANOPY_APNS_RATE_LIMIT: ${CANOPY_APNS_RATE_LIMIT:-120}
       CANOPY_APNS_RATE_BURST: ${CANOPY_APNS_RATE_BURST:-30}
+
+      # Self-service enrollment: instances get their own key from
+      # POST /v1/instances, so no admin ever handles a credential. Since keys
+      # are therefore free, the per-address limit below is what actually caps
+      # abuse — the per-instance limit above is only a speed bump once someone
+      # can mint a fresh bucket. Set ENROLLMENT_ENABLED=false to close the door
+      # entirely; instances already holding a key keep working.
+      CANOPY_APNS_ENROLLMENT_ENABLED: ${CANOPY_APNS_ENROLLMENT_ENABLED:-true}
+      CANOPY_APNS_ENROLLMENT_PER_HOUR: ${CANOPY_APNS_ENROLLMENT_PER_HOUR:-10}
+      CANOPY_APNS_ENROLLMENT_BURST: ${CANOPY_APNS_ENROLLMENT_BURST:-5}
+
+      # Enrollment buckets by source address, so the app must see the real
+      # client rather than Coolify's proxy. `*` trusts the proxy's
+      # X-Forwarded-For, which is correct while the container is only reachable
+      # through it — as `expose` (not `ports`) below ensures.
+      CANOPY_APNS_FORWARDED_ALLOW_IPS: ${CANOPY_APNS_FORWARDED_ALLOW_IPS:-*}
 
     # `expose`, not `ports`. Coolify's proxy reaches the container over the
     # Docker network, so publishing a host port is both unnecessary and

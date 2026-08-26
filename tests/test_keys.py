@@ -89,3 +89,15 @@ def test_generated_secrets_are_distinct_and_long() -> None:
     first, second = generate_secret(), generate_secret()
     assert first != second
     assert len(first) >= 40
+
+
+def test_generated_instance_ids_are_usable_and_distinct() -> None:
+    """Enrollment invents an id rather than recording one, so it must be safe
+    to derive a key from without any uniqueness check."""
+    from canopy_apns.keys import INSTANCE_ID_PATTERN, generate_instance_id
+
+    ids = {generate_instance_id() for _ in range(200)}
+
+    assert len(ids) == 200
+    assert all(INSTANCE_ID_PATTERN.match(i) for i in ids)
+    assert all(verify(mint(i, secret=SECRET), secret=SECRET).id == i for i in ids)

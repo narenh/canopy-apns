@@ -37,9 +37,15 @@ from .apns import (
     validate_private_key,
 )
 from .config import Settings, load_settings
-from .keys import Instance, InvalidKey, verify
+from .keys import Instance, InvalidKey, generate_instance_id, mint, verify
 from .ratelimit import RateLimiter
-from .schemas import HealthResponse, PushRequest, PushResponse, VerifyResponse
+from .schemas import (
+    EnrollResponse,
+    HealthResponse,
+    PushRequest,
+    PushResponse,
+    VerifyResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +59,16 @@ class RelayState:
     """The one outbound client. HTTP/2 because APNs speaks nothing else."""
 
     tokens: ProviderTokenCache = field(default_factory=ProviderTokenCache)
+
     limiter: RateLimiter | None = None
+    """Pushes, bucketed per instance."""
+
+    enrollment_limiter: RateLimiter | None = None
+    """Enrollments, bucketed per source address.
+
+    A separate limiter with a separate key space, because the two are limiting
+    different things against different identities: one caps what an instance we
+    know may do, the other caps how many instances a stranger may become."""
 
 
 def _state(request: Request) -> RelayState:
@@ -135,6 +150,9 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
             limiter=RateLimiter(
                 per_minute=active.rate_limit_per_minute, burst=active.rate_burst
             ),
+            enrollment_limiter=RateLimiter.per_hour(
+                active.enrollment_per_hour, burst=active.enrollment_burst
+            ),
         )
 
         if active.apns is None:
@@ -181,6 +199,71 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         """
         return HealthResponse(
             apns="configured" if state.settings.configured else "unconfigured"
+        )
+
+    @app.post(
+        "/v1/instances",
+        response_model=EnrollResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["relay"],
+    )
+    async def enroll(request: Request, state: StateDep) -> EnrollResponse:
+        """Issue a fresh instance identity and API key. **Unauthenticated.**
+
+        This endpoint exists because the alternative was worse. Making an
+        instance admin obtain a key out of band and paste it into a settings
+        form put a credential in front of someone whose actual intent was "I
+        would like notifications", and every one of them would have had to be
+        handed a key by a human. Nobody was going to run their own relay, so
+        the key was pure friction protecting nothing they had chosen.
+
+        It stays stateless: a random id, its derived key, nothing written. See
+        :mod:`canopy_apns.keys`.
+
+        **The honest trade.** Keys being free means a per-key rate limit is a
+        speed bump rather than a wall — anyone refused can enroll again and get
+        a fresh bucket. What actually holds the line is the per-address
+        enrollment limit here, revocation by instance id, and
+        ``CANOPY_APNS_ENROLLMENT_ENABLED=false`` as the switch to close the door
+        entirely if this is ever abused. That is a deliberate trade of a weaker
+        abuse boundary for an admin experience that does not involve credentials
+        at all.
+        """
+        if not state.settings.enrollment_enabled:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "This relay is not issuing new keys. Ask its operator for one.",
+            )
+
+        limiter = state.enrollment_limiter
+        if limiter is not None:
+            # Keyed on the source address. Behind a proxy this is only the real
+            # client because uvicorn is run with proxy headers trusted; see
+            # `__main__`. Without that it would bucket the whole internet
+            # together under the proxy's own address.
+            source = request.client.host if request.client else "unknown"
+            decision = limiter.check(f"enroll:{source}")
+            if not decision.allowed:
+                logger.warning("rate-limited enrollment from %s", source)
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    "Too many enrollments from this address. Try again shortly.",
+                    headers={"Retry-After": str(decision.retry_after_seconds)},
+                )
+
+        instance_id = generate_instance_id()
+        api_key = mint(instance_id, secret=state.settings.signing_secret)
+        apns = state.settings.apns
+
+        # The id, never the key. A log line carrying the credential it just
+        # issued would undo the point of never storing one.
+        logger.info("enrolled instance %s", instance_id)
+
+        return EnrollResponse(
+            instance_id=instance_id,
+            api_key=api_key,
+            bundle_id=apns.bundle_id if apns else None,
+            ready=apns is not None,
         )
 
     @app.get("/v1/verify", response_model=VerifyResponse, tags=["relay"])
