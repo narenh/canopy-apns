@@ -256,7 +256,7 @@ because there is no storage for either to write to.
 | `CANOPY_APNS_RATE_LIMIT` | — | `120` | Pushes per minute per instance |
 | `CANOPY_APNS_RATE_BURST` | — | `30` | Bucket capacity, i.e. how large a burst is tolerated |
 | `CANOPY_APNS_HOST` | — | `0.0.0.0` | Bind address |
-| `CANOPY_APNS_PORT` | — | `8080` | Bind port |
+| `CANOPY_APNS_PORT` | — | `9247` | Bind port |
 | `CANOPY_APNS_LOG_LEVEL` | — | `info` | uvicorn log level |
 
 **A missing signing secret stops startup** — without it no API key can be

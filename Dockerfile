@@ -16,7 +16,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     CANOPY_APNS_HOST=0.0.0.0 \
-    CANOPY_APNS_PORT=8080
+    CANOPY_APNS_PORT=9247
 
 WORKDIR /app
 
@@ -28,7 +28,7 @@ RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
 # Every credential arrives as an environment variable.
 RUN useradd --system --create-home --uid 10001 canopy
 
-EXPOSE 8080
+EXPOSE 9247
 
 # urlopen raises on a non-2xx, so no status check is needed; kept to one line
 # so there is no shell continuation to get wrong. /health answers 200 even

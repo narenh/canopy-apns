@@ -18,10 +18,10 @@ services:
       # variable NAME — `SERVICE_FQDN_<IDENTIFIER>_<PORT>` — and the value is
       # the path to route. Outside Coolify it is simply unset; the app never
       # reads it.
-      SERVICE_FQDN_CANOPYAPNS_8080: /
+      SERVICE_FQDN_CANOPYAPNS_9247: /
 
       CANOPY_APNS_HOST: 0.0.0.0
-      CANOPY_APNS_PORT: "8080"
+      CANOPY_APNS_PORT: "9247"
       CANOPY_APNS_LOG_LEVEL: info
       TZ: UTC
 
@@ -54,11 +54,11 @@ services:
 
     # `expose`, not `ports`. Coolify's proxy reaches the container over the
     # Docker network, so publishing a host port is both unnecessary and
-    # actively harmful: it binds 0.0.0.0:8080 on the host, which fails outright
+    # actively harmful: it binds 0.0.0.0:9247 on the host, which fails outright
     # if anything else already holds that port, and otherwise leaves the
     # service reachable bypassing the proxy and its TLS.
     expose:
-      - "8080"
+      - "9247"
 
     # No `volumes:`. The relay is stateless by construction — see the README.
 

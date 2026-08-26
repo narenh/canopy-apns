@@ -37,7 +37,7 @@ def _serve() -> int:
     from .app import create_app
 
     host = os.environ.get("CANOPY_APNS_HOST", "0.0.0.0")  # noqa: S104 - containerised
-    port = int(os.environ.get("CANOPY_APNS_PORT", "8080"))
+    port = int(os.environ.get("CANOPY_APNS_PORT", "9247"))
     log_level = os.environ.get("CANOPY_APNS_LOG_LEVEL", "info")
 
     uvicorn.run(create_app(), host=host, port=port, log_level=log_level)
