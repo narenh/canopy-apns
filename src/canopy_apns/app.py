@@ -333,6 +333,7 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
                 device_token=notification.device_token,
                 title=notification.title,
                 body=notification.body,
+                badge=notification.badge,
                 data=notification.data,
                 environment=notification.environment,
                 collapse_id=notification.collapse_id,

@@ -136,6 +136,7 @@ and one who is probing should not be told.
   "environment": "production",        // or "sandbox"; a property of the token
   "title": "The End of Oak Street (2026)",
   "body": "Requested by Robin Example",   // `subtitle` also accepted; see below
+  "badge": 3,                         // optional; omit to leave the icon alone
   "data": { "imdb_id": "tt1234567" }, // optional, opaque, ≤1KB
   "collapse_id": "req-7"              // optional
 }
@@ -147,7 +148,8 @@ Becomes, at Apple:
 {
   "aps": {
     "alert": { "title": "…", "body": "…" },
-    "sound": "default"
+    "sound": "default",
+    "badge": 3
   },
   "canopy": { "imdb_id": "tt1234567" }
 }
@@ -155,6 +157,26 @@ Becomes, at Apple:
 
 with `apns-push-type: alert`, `apns-priority: 10`, `apns-expiration: 0` and
 `apns-topic` set to the relay's configured bundle id.
+
+**`badge` is optional and absent by default.** APNs has no increment — you
+send an absolute number and the last one wins — so the count has to be computed
+by whoever knows the user's unread total, which is the instance. The relay
+cannot compute it and should not: that would mean tracking a count per device,
+which is exactly the device→instance mapping [the isolation
+model](#the-isolation-model) exists in order not to have.
+
+Three states, all distinct:
+
+| `badge` | Effect |
+|---|---|
+| omitted or `null` | No `badge` key reaches Apple; the icon keeps whatever it showed |
+| `0` | Sent, and clears the icon |
+| a positive integer | Sent, and sets the icon to it |
+
+Omitted is the default, so a client that has never sent a badge produces a
+payload byte-identical to the one it produced before badges existed. Note that
+the count is per-user while a push is per-device, so a caller with several
+devices for one user sends the same number to each.
 
 **The second line is `body`, not `subtitle`.** iOS renders an alert's title
 *and* its subtitle in bold, and only `body` in regular weight — so a

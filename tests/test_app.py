@@ -242,6 +242,51 @@ async def test_the_old_subtitle_field_still_works(
 
 
 @respx.mock
+async def test_a_badge_is_forwarded(client: AsyncClient, auth: dict[str, str]) -> None:
+    route = _apns_route().mock(return_value=httpx.Response(200))
+
+    response = await client.post("/v1/push", json={**PUSH, "badge": 4}, headers=auth)
+
+    assert response.status_code == 200
+    payload = json.loads(route.calls[0].request.read())
+    assert payload["aps"]["badge"] == 4
+
+
+@respx.mock
+async def test_a_push_without_a_badge_carries_no_badge_key(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    """The back-compat guarantee: cplus sends no badge and nothing changes."""
+    route = _apns_route().mock(return_value=httpx.Response(200))
+
+    response = await client.post("/v1/push", json=PUSH, headers=auth)
+
+    assert response.status_code == 200
+    payload = json.loads(route.calls[0].request.read())
+    assert "badge" not in payload["aps"]
+
+
+@respx.mock
+async def test_a_zero_badge_is_forwarded_rather_than_treated_as_absent(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    route = _apns_route().mock(return_value=httpx.Response(200))
+
+    response = await client.post("/v1/push", json={**PUSH, "badge": 0}, headers=auth)
+
+    assert response.status_code == 200
+    payload = json.loads(route.calls[0].request.read())
+    assert payload["aps"]["badge"] == 0
+
+
+async def test_a_negative_badge_is_refused(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    response = await client.post("/v1/push", json={**PUSH, "badge": -1}, headers=auth)
+    assert response.status_code == 422
+
+
+@respx.mock
 async def test_a_sandbox_push_goes_to_the_sandbox_host(
     client: AsyncClient, auth: dict[str, str]
 ) -> None:
