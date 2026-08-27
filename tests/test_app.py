@@ -48,6 +48,45 @@ async def test_the_root_explains_itself_rather_than_404ing(client: AsyncClient) 
     assert response.json()["service"] == "canopy-apns"
 
 
+async def test_a_browser_gets_the_diagnostic_page(client: AsyncClient) -> None:
+    response = await client.get("/", headers={"Accept": "text/html"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "canopy-apns" in response.text
+
+
+async def test_the_page_reports_the_scheme_and_forwarding_headers(
+    client: AsyncClient,
+) -> None:
+    """The whole point of the page: what the relay thinks it was reached over."""
+    response = await client.get(
+        "/",
+        headers={"Accept": "text/html", "X-Forwarded-Proto": "https"},
+    )
+    assert 'data-scheme="http"' in response.text
+    # Named so the operator can see the header arrived even though the app
+    # still resolved http — that gap is the bug this page is for.
+    assert "X-Forwarded-Proto" in response.text or "x-forwarded-proto" in response.text
+    assert "https" in response.text
+
+
+async def test_the_page_escapes_header_values(client: AsyncClient) -> None:
+    """Every value on the page came from a header, so none of it is trusted."""
+    response = await client.get(
+        "/",
+        headers={"Accept": "text/html", "X-Forwarded-For": "<script>alert(1)</script>"},
+    )
+    assert "<script>alert(1)</script>" not in response.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in response.text
+
+
+async def test_the_page_reports_an_unconfigured_relay(
+    unconfigured_client: AsyncClient,
+) -> None:
+    response = await unconfigured_client.get("/", headers={"Accept": "text/html"})
+    assert "not configured" in response.text
+
+
 # ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------

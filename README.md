@@ -19,7 +19,7 @@ It stores nothing. No database, no volume, no queue, no device tokens.
 - [API](#api)
 - [Instance API keys](#instance-api-keys) — including self-service enrollment
 - [Configuration](#configuration)
-- [Deploying on Coolify](#deploying-on-coolify)
+- [Deploying on Coolify](#deploying-on-coolify) — including [checking TLS from a browser](#checking-tls-and-the-proxy-from-a-browser)
 - [Privacy: what the relay operator can see](#privacy-what-the-relay-operator-can-see)
 - [Development](#development)
 
@@ -121,7 +121,7 @@ Base URL in production: `https://apns.canopysf.com`.
 | `POST /v1/instances` | none | Self-service enrollment: issues an instance id and API key |
 | `GET /v1/verify` | Bearer | Confirm a key works; for an instance's settings page |
 | `POST /v1/push` | Bearer | Forward one notification to one device |
-| `GET /` | none | Says what this is; there is no web UI |
+| `GET /` | none | Says what this is; in a browser, [a page showing what the relay saw](#checking-tls-and-the-proxy-from-a-browser) |
 
 Authentication is `Authorization: Bearer <instance-api-key>`. Every rejection is
 the same flat 401 with the same message, whether the key was malformed, forged,
@@ -376,6 +376,38 @@ Buckets for instances that have gone quiet are dropped after an hour of idleness
 There is **no volume and no `/data`**. If a redeploy loses something, it was not
 this service's.
 
+### Checking TLS and the proxy from a browser
+
+Open `https://apns.canopysf.com/` in a browser and the relay renders a
+diagnostic page instead of the JSON `curl` gets. There is still no web UI — the
+page is a mirror, and it exists because the usual deployment failure behind a
+terminating proxy is invisible from the outside.
+
+That failure: the browser speaks HTTPS, the proxy forwards over plain HTTP, and
+the app never learns the original scheme, because the proxy is not sending
+`X-Forwarded-Proto` or uvicorn is not trusting it. Everything downstream — a
+redirect loop, a link that drops to `http://`, a blocked mixed-content fetch —
+is a symptom of that one disagreement and none of them name it. So the page
+prints, side by side:
+
+- the scheme the **relay** resolved, and the scheme the **browser** actually
+  used, with a banner naming the mismatch and which direction it runs in;
+- every forwarding header as received (`X-Forwarded-Proto`, `-For`, `-Host`,
+  `-Port`, `Forwarded`, `X-Real-IP`, `Host`), including the ones that are
+  absent — a blank `X-Forwarded-Proto` is usually the whole answer;
+- the client address the relay ended up with, which is what the per-address
+  enrollment limit buckets on, so a proxy trusted wrongly shows up here too;
+- a live same-origin fetch of `/health`, which fails visibly if the browser is
+  blocking it as mixed content or the request is being redirected across
+  schemes.
+
+Links on the page are relative, so clicking `/health` or `/docs` keeps whatever
+scheme you arrived on and any redirect is the deployment's own.
+
+Nothing on the page is privileged: it reflects your own request back at you,
+plus what `/health` already says publicly. It stores nothing, and it is
+`noindex`.
+
 ### Getting the `.p8` in the first place
 
 In the Apple Developer portal, **Certificates, Identifiers & Profiles → Keys**,
@@ -441,6 +473,7 @@ src/canopy_apns/
   apns.py        provider-token signing and the HTTP/2 push
   ratelimit.py   a token bucket per instance
   schemas.py     the wire contract, extra="forbid" throughout
+  landing.py     the browser page at /: what the relay saw of your request
   app.py         the four endpoints
   __main__.py    serve | secret | mint
 ```

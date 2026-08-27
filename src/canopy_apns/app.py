@@ -27,8 +27,8 @@ from dataclasses import dataclass, field
 from typing import Annotated
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from .apns import (
     ApnsClient,
@@ -38,6 +38,7 @@ from .apns import (
 )
 from .config import Settings, load_settings
 from .keys import Instance, InvalidKey, generate_instance_id, mint, verify
+from .landing import render_landing, wants_html
 from .ratelimit import RateLimiter
 from .schemas import (
     EnrollResponse,
@@ -48,6 +49,8 @@ from .schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+VERSION = "1.0.0"
 
 
 @dataclass
@@ -186,7 +189,7 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
             "A stateless APNs forwarder for self-hosted Canopy+ instances. "
             "Holds the signing key so instances do not have to; stores nothing."
         ),
-        version="1.0.0",
+        version=VERSION,
         lifespan=lifespan,
     )
 
@@ -362,8 +365,24 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         )
 
     @app.get("/", include_in_schema=False)
-    async def root() -> JSONResponse:
-        """There is no web UI. Point a browser here and it says as much."""
+    async def root(request: Request, state: StateDep) -> Response:
+        """What the relay is, and what it saw of your request.
+
+        A browser gets HTML — see :mod:`canopy_apns.landing`, which is there to
+        make a TLS-termination problem visible in one page load instead of one
+        log dive. Anything else gets the JSON it always got, so a health-check
+        or a script pointed at ``/`` is unaffected.
+        """
+        if wants_html(request):
+            return HTMLResponse(
+                render_landing(
+                    request,
+                    version=VERSION,
+                    apns_configured=state.settings.configured,
+                    enrollment_enabled=state.settings.enrollment_enabled,
+                    rate_limit_per_minute=state.settings.rate_limit_per_minute,
+                )
+            )
         return JSONResponse(
             {
                 "service": "canopy-apns",
@@ -372,6 +391,7 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
                     "Ask the operator for a relay API key."
                 ),
                 "docs": "/docs",
+                "scheme": request.url.scheme,
             }
         )
 
