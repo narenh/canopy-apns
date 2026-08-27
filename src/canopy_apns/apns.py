@@ -215,7 +215,11 @@ class ProviderTokenCache:
 
 
 def build_payload(
-    *, title: str, body: str | None, data: dict[str, Any] | None
+    *,
+    title: str,
+    body: str | None,
+    badge: int | None = None,
+    data: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """The APNs JSON body for one notification.
 
@@ -233,6 +237,13 @@ def build_payload(
     ``subtitle`` is for a middle line between the two, which the relay's
     two-line contract has no use for.
 
+    ``badge`` is tested against ``None`` rather than for truthiness, because
+    ``0`` is a real instruction — it clears the icon — and a falsiness check
+    would silently drop exactly the value that does the clearing.  Omitted
+    entirely when ``None``, which leaves whatever the icon already showed and
+    keeps the payload byte-identical to one from a client that has never heard
+    of badges.
+
     ``data`` rides under a ``canopy`` key alongside ``aps`` rather than inside
     it — that is the documented place for app-specific fields, and it keeps a
     malformed one from being an APNs rejection.
@@ -241,7 +252,13 @@ def build_payload(
     if body:
         alert["body"] = body
 
-    payload: dict[str, Any] = {"aps": {"alert": alert, "sound": "default"}}
+    aps: dict[str, Any] = {"alert": alert, "sound": "default"}
+    if badge is not None:
+        # A sibling of `alert`, not a child of it. Nested inside, Apple ignores
+        # it and the icon silently never changes.
+        aps["badge"] = badge
+
+    payload: dict[str, Any] = {"aps": aps}
     if data:
         payload["canopy"] = data
     return payload
@@ -279,6 +296,7 @@ class ApnsClient:
         device_token: str,
         title: str,
         body: str | None = None,
+        badge: int | None = None,
         data: dict[str, Any] | None = None,
         environment: str = "production",
         collapse_id: str | None = None,
@@ -290,7 +308,7 @@ class ApnsClient:
         faulting (try again). Anything still failing after that is either our
         bug or Apple being down, and hammering it helps neither.
         """
-        payload = build_payload(title=title, body=body, data=data)
+        payload = build_payload(title=title, body=body, badge=badge, data=data)
         url = f"{self._host(environment)}/3/device/{device_token}"
 
         result = await self._attempt(url, payload, collapse_id=collapse_id)

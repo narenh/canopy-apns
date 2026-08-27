@@ -61,6 +61,22 @@ class PushRequest(BaseModel):
     separately.  Either name sets the same field and produces the same alert.
     """
 
+    badge: int | None = Field(default=None, ge=0)
+    """The number on the app icon, or ``None`` to leave it alone.
+
+    A badge is a count of state on the instance, not a property of this
+    notification, and APNs has no increment — you send an absolute number and
+    the last one wins.  So the instance computes it and the relay forwards it
+    verbatim.  The relay could not compute it even if it wanted to: that would
+    mean tracking a count per device, which is precisely the device→instance
+    mapping the isolation model exists in order not to have.
+
+    ``None`` and ``0`` are different and both meaningful.  ``None`` (the
+    default, and what every client sending no badge at all gets) omits ``badge``
+    from the payload entirely, leaving whatever the icon already showed.  ``0``
+    is sent, and clears it.
+    """
+
     data: dict[str, Any] | None = None
     """Opaque to the relay, forwarded under a ``canopy`` key for the app to
     read on tap. Size-capped so it cannot push the notification past Apple's

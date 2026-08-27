@@ -119,6 +119,32 @@ def test_the_second_line_is_body_so_ios_does_not_bold_it() -> None:
     assert "subtitle" not in payload["aps"]["alert"]
 
 
+def test_a_badge_is_a_sibling_of_alert_not_a_child() -> None:
+    """Nested inside `alert`, Apple ignores it and the icon never changes."""
+    payload = build_payload(title="T", body=None, badge=3, data=None)
+    assert payload["aps"]["badge"] == 3
+    assert "badge" not in payload["aps"]["alert"]
+
+
+def test_a_zero_badge_is_sent_because_zero_is_what_clears_it() -> None:
+    """The value a truthiness check would drop, and the only way to clear."""
+    payload = build_payload(title="T", body=None, badge=0, data=None)
+    assert payload["aps"]["badge"] == 0
+
+
+def test_no_badge_leaves_the_payload_exactly_as_it_was() -> None:
+    """cplus sends no badge today; its pushes must not change by one byte.
+
+    An absent badge has to mean "leave the icon alone", which is a different
+    instruction from `badge: 0`, and it must reach Apple as a payload with no
+    `badge` key at all.
+    """
+    payload = build_payload(title="A Title", body="A second line", data=None)
+    assert payload == {
+        "aps": {"alert": {"title": "A Title", "body": "A second line"}, "sound": "default"}
+    }
+
+
 def test_instance_data_rides_beside_aps_not_inside_it() -> None:
     """So a malformed blob is the app's problem, never an APNs rejection."""
     payload = build_payload(title="T", body=None, data={"imdb_id": "tt1"})
