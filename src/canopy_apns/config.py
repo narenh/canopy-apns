@@ -38,7 +38,10 @@ DEFAULT_ENROLLMENT_BURST = 5
 #: notification at 4KB; these keep any one field from eating it, and keep the
 #: relay from being used as a general-purpose message bus.
 MAX_TITLE_LENGTH = 200
-MAX_SUBTITLE_LENGTH = 200
+MAX_BODY_LENGTH = 200
+"""The second line of the alert.  Named for the APNs field it becomes — see
+:func:`canopy_apns.apns.build_payload` for why that is ``body`` and not
+``subtitle``."""
 MAX_DATA_BYTES = 1024
 
 
@@ -214,13 +217,85 @@ class Settings:
         return instance_id in self.revoked_instances
 
 
+#: Shortest signing secret the relay will start with.  Every instance API key
+#: is an HMAC under this value, so its entropy is the entropy of every key ever
+#: issued.  :func:`canopy_apns.keys.generate_secret` produces 64 characters;
+#: this floor only rules out something typed by hand.
+MIN_SIGNING_SECRET_LENGTH = 32
+
+#: Substrings that mark a signing secret as boilerplate rather than a secret,
+#: matched case-insensitively.  The first entry is not hypothetical: Coolify
+#: reads ``${VAR:?message}`` in a compose file as a *default* rather than as
+#: compose's "abort if unset", so a deployment came up with its signing secret
+#: set to the literal words ``set this in Coolify`` — public, non-empty, and
+#: therefore indistinguishable from a real secret to a check that only asks
+#: whether the value is blank.
+_PLACEHOLDER_MARKERS = (
+    "set this",
+    "changeme",
+    "change me",
+    "change this",
+    "replace this",
+    "your secret",
+    "your-secret",
+    "secret here",
+    "placeholder",
+    "example",
+    "todo",
+)
+
+
+def _check_signing_secret(value: str) -> None:
+    """Refuse a signing secret that is present but not actually a secret.
+
+    Absent was always caught.  What was not: a value that is *there* and
+    worthless, which is the state a deploy tool's placeholder leaves behind and
+    the one that fails silently — the relay boots, serves, mints keys, and
+    every one of them is forgeable by anyone who can read the repo.
+
+    So three cheap questions, each ruling out something a generated secret can
+    never be.  Whitespace: :func:`~canopy_apns.keys.generate_secret` emits
+    URL-safe base64 and nothing else, while every placeholder that has actually
+    turned up is an English phrase.  Length: below
+    :data:`MIN_SIGNING_SECRET_LENGTH` it is hand-typed whatever it says.
+    Known boilerplate: the phrases in :data:`_PLACEHOLDER_MARKERS`.
+
+    A deployment already running on a weak secret will crash-loop on its next
+    redeploy rather than quietly carrying on, which is the intent: the fix is a
+    rotation it needed regardless, and the alternative is a fleet that never
+    finds out.
+    """
+    if any(character.isspace() for character in value):
+        raise ConfigError(
+            "CANOPY_APNS_SIGNING_SECRET contains whitespace, so it is almost "
+            "certainly placeholder text rather than a secret. Generate a real "
+            "one with `python -m canopy_apns secret`."
+        )
+
+    lowered = value.lower()
+    if any(marker in lowered for marker in _PLACEHOLDER_MARKERS):
+        raise ConfigError(
+            "CANOPY_APNS_SIGNING_SECRET still looks like placeholder text. "
+            "Every instance API key is an HMAC under this value, so a "
+            "guessable one lets anyone mint keys. Generate a real one with "
+            "`python -m canopy_apns secret`."
+        )
+
+    if len(value) < MIN_SIGNING_SECRET_LENGTH:
+        raise ConfigError(
+            f"CANOPY_APNS_SIGNING_SECRET is {len(value)} characters; the "
+            f"minimum is {MIN_SIGNING_SECRET_LENGTH}. Generate one with "
+            "`python -m canopy_apns secret`, which produces 64."
+        )
+
+
 def load_settings() -> Settings:
     """Build :class:`Settings` from the process environment.
 
     Raises :class:`ConfigError` when the environment is unusable — which for
-    the signing secret means *absent*, since without it no API key can be
-    verified and every request would be rejected anyway.  Failing at startup
-    with one sentence beats serving nothing but 401s.
+    the signing secret means absent, and also means present-but-boilerplate:
+    see :func:`_check_signing_secret`.  Failing at startup with one sentence
+    beats serving nothing but 401s, and beats serving forgeable keys silently.
     """
     signing_secret = _clean("CANOPY_APNS_SIGNING_SECRET")
     if not signing_secret:
@@ -229,6 +304,7 @@ def load_settings() -> Settings:
             "`python -m canopy_apns secret` and set it on the deployment; "
             "every instance API key is derived from it."
         )
+    _check_signing_secret(signing_secret)
 
     revoked = {
         part.strip().lower()
@@ -257,9 +333,10 @@ __all__ = [
     "DEFAULT_ENROLLMENT_PER_HOUR",
     "DEFAULT_RATE_BURST",
     "DEFAULT_RATE_LIMIT_PER_MINUTE",
+    "MAX_BODY_LENGTH",
     "MAX_DATA_BYTES",
-    "MAX_SUBTITLE_LENGTH",
     "MAX_TITLE_LENGTH",
+    "MIN_SIGNING_SECRET_LENGTH",
     "ApnsCredentials",
     "ConfigError",
     "Settings",

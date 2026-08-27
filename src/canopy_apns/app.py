@@ -292,7 +292,7 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
 
     @app.post("/v1/push", response_model=PushResponse, tags=["relay"])
     async def push(
-        body: PushRequest, instance: InstanceDep, state: StateDep
+        notification: PushRequest, instance: InstanceDep, state: StateDep
     ) -> PushResponse:
         """Forward one notification to one device.
 
@@ -330,12 +330,12 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         client = ApnsClient(credentials, client=state.http, tokens=state.tokens)
         try:
             result = await client.send(
-                device_token=body.device_token,
-                title=body.title,
-                subtitle=body.subtitle,
-                data=body.data,
-                environment=body.environment,
-                collapse_id=body.collapse_id,
+                device_token=notification.device_token,
+                title=notification.title,
+                body=notification.body,
+                data=notification.data,
+                environment=notification.environment,
+                collapse_id=notification.collapse_id,
             )
         except ApnsConfigError as exc:
             # The key parsed at startup, so reaching here means it changed
@@ -353,7 +353,7 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         logger.info(
             "push instance=%s env=%s result=%s reason=%s",
             instance.id,
-            body.environment,
+            notification.environment,
             result.outcome.value,
             result.reason or "-",
         )

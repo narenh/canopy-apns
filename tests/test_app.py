@@ -197,7 +197,7 @@ async def test_a_push_is_forwarded_to_apple(
 
     response = await client.post(
         "/v1/push",
-        json={**PUSH, "subtitle": "Requested by Robin Example", "data": {"imdb_id": "tt1"}},
+        json={**PUSH, "body": "Requested by Robin Example", "data": {"imdb_id": "tt1"}},
         headers=auth,
     )
 
@@ -211,9 +211,34 @@ async def test_a_push_is_forwarded_to_apple(
     payload = json.loads(route.calls[0].request.read())
     assert payload["aps"]["alert"] == {
         "title": PUSH["title"],
-        "subtitle": "Requested by Robin Example",
+        "body": "Requested by Robin Example",
     }
     assert payload["canopy"] == {"imdb_id": "tt1"}
+
+
+@respx.mock
+async def test_the_old_subtitle_field_still_works(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    """`subtitle` was the field's name before iOS's bolding was noticed.
+
+    The two services deploy separately and the schema forbids unknown fields,
+    so removing the old name outright would turn every push from a client that
+    has not been redeployed into a 422. It aliases onto `body` and produces the
+    same alert.
+    """
+    route = _apns_route().mock(return_value=httpx.Response(200))
+
+    response = await client.post(
+        "/v1/push",
+        json={**PUSH, "subtitle": "Requested by Robin Example"},
+        headers=auth,
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(route.calls[0].request.read())
+    assert payload["aps"]["alert"]["body"] == "Requested by Robin Example"
+    assert "subtitle" not in payload["aps"]["alert"]
 
 
 @respx.mock

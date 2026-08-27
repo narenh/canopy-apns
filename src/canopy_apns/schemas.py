@@ -14,9 +14,9 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
-from .config import MAX_DATA_BYTES, MAX_SUBTITLE_LENGTH, MAX_TITLE_LENGTH
+from .config import MAX_BODY_LENGTH, MAX_DATA_BYTES, MAX_TITLE_LENGTH
 
 
 class PushRequest(BaseModel):
@@ -41,7 +41,25 @@ class PushRequest(BaseModel):
     knows which its app is; the relay has no way to tell by looking."""
 
     title: str = Field(min_length=1, max_length=MAX_TITLE_LENGTH)
-    subtitle: str | None = Field(default=None, max_length=MAX_SUBTITLE_LENGTH)
+    """The bold first line."""
+
+    body: str | None = Field(
+        default=None,
+        max_length=MAX_BODY_LENGTH,
+        validation_alias=AliasChoices("body", "subtitle"),
+    )
+    """The regular-weight second line.
+
+    Called ``subtitle`` until it turned out that iOS bolds an alert's subtitle
+    as well as its title, so every Canopy+ notification arrived as two bold
+    lines while Messages and Mail put their second line in ``body`` and got
+    normal weight.  The field is ``body`` now, for the APNs key it becomes.
+
+    ``subtitle`` stays accepted as an alias rather than being removed, because
+    ``extra="forbid"`` means dropping it would turn every push from a client
+    that has not been redeployed yet into a 422 — and the two services deploy
+    separately.  Either name sets the same field and produces the same alert.
+    """
 
     data: dict[str, Any] | None = None
     """Opaque to the relay, forwarded under a ``canopy`` key for the app to

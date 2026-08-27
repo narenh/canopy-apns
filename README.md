@@ -63,7 +63,7 @@ Two consequences worth stating plainly:
   │  knows: tokens A, B      │        │  knows: tokens C, D      │
   └───────────┬──────────────┘        └───────────┬──────────────┘
               │ Bearer canopy_canopysf_…          │ Bearer canopy_notcanopy_…
-              │ {token: A, title, subtitle}       │ {token: C, title, subtitle}
+              │ {token: A, title, body}           │ {token: C, title, body}
               └────────────────┬──────────────────┘
                                ▼
                  ┌─────────────────────────────┐
@@ -135,7 +135,7 @@ and one who is probing should not be told.
   "device_token": "a1b2…",           // hex, as Apple issues it
   "environment": "production",        // or "sandbox"; a property of the token
   "title": "The End of Oak Street (2026)",
-  "subtitle": "Requested by Robin Example",
+  "body": "Requested by Robin Example",   // `subtitle` also accepted; see below
   "data": { "imdb_id": "tt1234567" }, // optional, opaque, ≤1KB
   "collapse_id": "req-7"              // optional
 }
@@ -146,7 +146,7 @@ Becomes, at Apple:
 ```jsonc
 {
   "aps": {
-    "alert": { "title": "…", "subtitle": "…" },
+    "alert": { "title": "…", "body": "…" },
     "sound": "default"
   },
   "canopy": { "imdb_id": "tt1234567" }
@@ -155,6 +155,15 @@ Becomes, at Apple:
 
 with `apns-push-type: alert`, `apns-priority: 10`, `apns-expiration: 0` and
 `apns-topic` set to the relay's configured bundle id.
+
+**The second line is `body`, not `subtitle`.** iOS renders an alert's title
+*and* its subtitle in bold, and only `body` in regular weight — so a
+notification built from title+subtitle arrives as two bold lines and reads as
+shouting next to every other app on the lock screen. Messages, Mail and the
+rest put the sender in `title` and the content in `body`; the relay now does
+the same. `subtitle` stays accepted as an alias for `body`, because the schema
+forbids unknown fields and the two services deploy separately — dropping the
+old name would 422 every push from a client that has not been redeployed yet.
 
 The response:
 
@@ -363,6 +372,16 @@ Buckets for instances that have gone quiet are dropped after an hour of idleness
    $ python -m canopy_apns secret
    ```
 
+   **Check what actually landed in the field.** Coolify prefills environment
+   variables from the compose file, and it reads `${VAR:?message}` — compose's
+   "abort if unset" — as a *default*, so an earlier version of this repo left
+   deployments running with their signing secret set to the literal words of
+   the error message. The compose file now uses an empty default, and
+   `load_settings()` refuses a secret containing whitespace, matching known
+   boilerplate, or shorter than 32 characters. All three are startup failures:
+   a relay that will not boot is strictly better than one minting forgeable
+   keys.
+
 4. **Deploy.** Check `GET /health` says `"apns": "configured"`. If it says
    `unconfigured`, one of the four APNs variables is missing or blank — the
    service treats three-out-of-four as not configured, deliberately, because
@@ -433,7 +452,7 @@ no end-to-end encrypted path to APNs that would let the relay forward without
 seeing the content. For the duration of one request, the relay process holds:
 
 - the device token (a random per-device identifier, not a user identity);
-- the notification's title and subtitle — which for Canopy+ means a media title
+- the notification's title and body — which for Canopy+ means a media title
   and a username;
 - the instance's own `data` blob;
 - the instance id from the API key, and the source IP.

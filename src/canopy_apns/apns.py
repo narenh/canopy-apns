@@ -215,7 +215,7 @@ class ProviderTokenCache:
 
 
 def build_payload(
-    *, title: str, subtitle: str | None, data: dict[str, Any] | None
+    *, title: str, body: str | None, data: dict[str, Any] | None
 ) -> dict[str, Any]:
     """The APNs JSON body for one notification.
 
@@ -225,13 +225,21 @@ def build_payload(
     signing key.  An instance supplies text and its own opaque ``data``; the
     shape around them is not negotiable.
 
+    The second line goes in ``body``, not ``subtitle``.  iOS renders an alert's
+    title *and* subtitle in bold and only ``body`` in regular weight, so a
+    notification built from title+subtitle arrives as two bold lines and reads
+    as shouting next to every other app on the lock screen — Messages, Mail and
+    the rest all put the sender in ``title`` and the content in ``body``.
+    ``subtitle`` is for a middle line between the two, which the relay's
+    two-line contract has no use for.
+
     ``data`` rides under a ``canopy`` key alongside ``aps`` rather than inside
     it — that is the documented place for app-specific fields, and it keeps a
     malformed one from being an APNs rejection.
     """
     alert: dict[str, Any] = {"title": title}
-    if subtitle:
-        alert["subtitle"] = subtitle
+    if body:
+        alert["body"] = body
 
     payload: dict[str, Any] = {"aps": {"alert": alert, "sound": "default"}}
     if data:
@@ -270,7 +278,7 @@ class ApnsClient:
         *,
         device_token: str,
         title: str,
-        subtitle: str | None = None,
+        body: str | None = None,
         data: dict[str, Any] | None = None,
         environment: str = "production",
         collapse_id: str | None = None,
@@ -282,7 +290,7 @@ class ApnsClient:
         faulting (try again). Anything still failing after that is either our
         bug or Apple being down, and hammering it helps neither.
         """
-        payload = build_payload(title=title, subtitle=subtitle, data=data)
+        payload = build_payload(title=title, body=body, data=data)
         url = f"{self._host(environment)}/3/device/{device_token}"
 
         result = await self._attempt(url, payload, collapse_id=collapse_id)

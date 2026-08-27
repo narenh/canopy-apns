@@ -29,7 +29,14 @@ services:
       # Every instance API key is an HMAC over its instance id using this
       # secret. Generate once with `python -m canopy_apns secret`. Rotating it
       # invalidates every key ever issued, which is the break-glass revocation.
-      CANOPY_APNS_SIGNING_SECRET: ${CANOPY_APNS_SIGNING_SECRET:?set this in Coolify}
+      #
+      # `:-` and not `:?`. Compose reads `${VAR:?message}` as "abort with this
+      # message if unset", but Coolify's own parser reads everything after the
+      # colon as a default — so the deployment came up with its signing secret
+      # set to the literal words of the error message, which is both public and
+      # non-empty, and therefore sailed past every check the app had. An empty
+      # default reaches `load_settings()` as blank and crashes on purpose.
+      CANOPY_APNS_SIGNING_SECRET: ${CANOPY_APNS_SIGNING_SECRET:-}
 
       # The Apple Developer team that owns the push key, the key's own id, and
       # the app's bundle id (sent as the APNs topic — Apple rejects a push whose
