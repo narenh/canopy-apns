@@ -13,9 +13,12 @@ is allowed in.
 
 What it buys and what it costs, plainly:
 
-* **Issuing a key is offline.**  ``python -m canopy_apns mint acme`` prints one.
-  Nothing is written anywhere, so there is no provisioning endpoint to secure
-  and no way for a race between two admins to lose a key.
+* **Issuing a key writes nothing.**  Whether it comes from
+  ``python -m canopy_apns mint acme`` or from ``POST /v1/instances``, the key is
+  computed, handed over, and forgotten.  That is what lets self-service
+  enrollment exist at all without the relay growing a database: enrollment
+  invents a random id (:func:`generate_instance_id`) and derives its key, with
+  no allocation to record and no uniqueness check to serialise.
 * **The instance id is legible in the key.**  Deliberate: it is what logs and
   rate-limit buckets are keyed on, and it means a key found in a bug report can
   be attributed without a lookup.  It is an identifier, not a secret; the
@@ -23,8 +26,8 @@ What it buys and what it costs, plainly:
 * **Revocation is a list, not a delete.**  A derived key cannot be un-derived,
   so revoking one means naming its instance in
   ``CANOPY_APNS_REVOKED_INSTANCES``.  Revoking *everything* means rotating the
-  signing secret.  Both are redeploys.  For a service that hands out keys by
-  hand, that is an acceptable trade for having no persistence at all.
+  signing secret.  Both are redeploys, and both are the price of having no
+  persistence at all.
 
 The instance id's character set is constrained so that ``_`` stays an
 unambiguous separator: ids may not contain one, so the key always splits into
@@ -144,11 +147,35 @@ def generate_secret() -> str:
     return secrets.token_urlsafe(48)
 
 
+#: Bytes of randomness behind a self-enrolled instance id.  96 bits, which is
+#: about collision-avoidance rather than secrecy: the id is not the secret half
+#: of a key, and knowing one gets an attacker no closer to its signature.
+INSTANCE_ID_BYTES = 12
+
+
+def generate_instance_id() -> str:
+    """A fresh random instance id, for self-service enrollment.
+
+    Enrollment has to hand out an identity without storing one, so it invents a
+    random id and derives the key from it exactly as :func:`mint` would.  That
+    is the whole of what makes ``POST /v1/instances`` a stateless endpoint:
+    there is no allocation to record and no uniqueness check to serialise,
+    because 96 bits of randomness makes a collision not worth the code to
+    prevent.
+
+    Base32 keeps the result inside :data:`INSTANCE_ID_PATTERN` (lowercase
+    letters and digits only) with no separator characters to trip over.
+    """
+    return _encode(secrets.token_bytes(INSTANCE_ID_BYTES))
+
+
 __all__ = [
+    "INSTANCE_ID_BYTES",
     "INSTANCE_ID_PATTERN",
     "KEY_PREFIX",
     "Instance",
     "InvalidKey",
+    "generate_instance_id",
     "generate_secret",
     "mint",
     "normalise_instance_id",

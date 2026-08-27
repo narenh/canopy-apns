@@ -13,15 +13,15 @@ services:
     restart: unless-stopped
 
     environment:
-      # Coolify replaces this with the domain you assign (notifications.canopysf.com)
+      # Coolify replaces this with the domain you assign (apns.canopysf.com)
       # and wires up its proxy and TLS certificate. The port belongs in the
       # variable NAME — `SERVICE_FQDN_<IDENTIFIER>_<PORT>` — and the value is
       # the path to route. Outside Coolify it is simply unset; the app never
       # reads it.
-      SERVICE_FQDN_CANOPYAPNS_8080: /
+      SERVICE_FQDN_CANOPYAPNS_9247: /
 
       CANOPY_APNS_HOST: 0.0.0.0
-      CANOPY_APNS_PORT: "8080"
+      CANOPY_APNS_PORT: "9247"
       CANOPY_APNS_LOG_LEVEL: info
       TZ: UTC
 
@@ -29,7 +29,14 @@ services:
       # Every instance API key is an HMAC over its instance id using this
       # secret. Generate once with `python -m canopy_apns secret`. Rotating it
       # invalidates every key ever issued, which is the break-glass revocation.
-      CANOPY_APNS_SIGNING_SECRET: ${CANOPY_APNS_SIGNING_SECRET:?set this in Coolify}
+      #
+      # `:-` and not `:?`. Compose reads `${VAR:?message}` as "abort with this
+      # message if unset", but Coolify's own parser reads everything after the
+      # colon as a default — so the deployment came up with its signing secret
+      # set to the literal words of the error message, which is both public and
+      # non-empty, and therefore sailed past every check the app had. An empty
+      # default reaches `load_settings()` as blank and crashes on purpose.
+      CANOPY_APNS_SIGNING_SECRET: ${CANOPY_APNS_SIGNING_SECRET:-}
 
       # The Apple Developer team that owns the push key, the key's own id, and
       # the app's bundle id (sent as the APNs topic — Apple rejects a push whose
@@ -52,13 +59,29 @@ services:
       CANOPY_APNS_RATE_LIMIT: ${CANOPY_APNS_RATE_LIMIT:-120}
       CANOPY_APNS_RATE_BURST: ${CANOPY_APNS_RATE_BURST:-30}
 
+      # Self-service enrollment: instances get their own key from
+      # POST /v1/instances, so no admin ever handles a credential. Since keys
+      # are therefore free, the per-address limit below is what actually caps
+      # abuse — the per-instance limit above is only a speed bump once someone
+      # can mint a fresh bucket. Set ENROLLMENT_ENABLED=false to close the door
+      # entirely; instances already holding a key keep working.
+      CANOPY_APNS_ENROLLMENT_ENABLED: ${CANOPY_APNS_ENROLLMENT_ENABLED:-true}
+      CANOPY_APNS_ENROLLMENT_PER_HOUR: ${CANOPY_APNS_ENROLLMENT_PER_HOUR:-10}
+      CANOPY_APNS_ENROLLMENT_BURST: ${CANOPY_APNS_ENROLLMENT_BURST:-5}
+
+      # Enrollment buckets by source address, so the app must see the real
+      # client rather than Coolify's proxy. `*` trusts the proxy's
+      # X-Forwarded-For, which is correct while the container is only reachable
+      # through it — as `expose` (not `ports`) below ensures.
+      CANOPY_APNS_FORWARDED_ALLOW_IPS: ${CANOPY_APNS_FORWARDED_ALLOW_IPS:-*}
+
     # `expose`, not `ports`. Coolify's proxy reaches the container over the
     # Docker network, so publishing a host port is both unnecessary and
-    # actively harmful: it binds 0.0.0.0:8080 on the host, which fails outright
+    # actively harmful: it binds 0.0.0.0:9247 on the host, which fails outright
     # if anything else already holds that port, and otherwise leaves the
     # service reachable bypassing the proxy and its TLS.
     expose:
-      - "8080"
+      - "9247"
 
     # No `volumes:`. The relay is stateless by construction — see the README.
 

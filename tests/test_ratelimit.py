@@ -66,3 +66,29 @@ def test_idle_buckets_are_forgotten() -> None:
     limiter.check("someone-else", now=IDLE_EVICTION_SECONDS + 1)
 
     assert "acme" not in limiter._buckets
+
+
+def test_per_hour_expresses_the_same_bucket_in_hourly_terms() -> None:
+    """Enrollment's natural unit: an instance enrols once in its life."""
+    limiter = RateLimiter.per_hour(10, burst=2)
+
+    assert [limiter.check("ip", now=0.0).allowed for _ in range(3)] == [True, True, False]
+    # 10/hour is one token every six minutes, so five minutes on is still short.
+    assert not limiter.check("ip", now=300.0).allowed
+
+
+def test_waiting_the_advertised_retry_after_is_always_enough() -> None:
+    """The one promise a refusal makes.
+
+    Asserted rather than assumed because the delay is computed in floating
+    point: a Retry-After that rounds even fractionally short would tell every
+    client to come back at the exact moment it is still refused, and the retry
+    loop that produces looks like a server fault from the outside.
+    """
+    limiter = RateLimiter.per_hour(10, burst=1)
+    limiter.check("ip", now=0.0)
+
+    refused = limiter.check("ip", now=0.0)
+    assert not refused.allowed
+
+    assert limiter.check("ip", now=float(refused.retry_after_seconds)).allowed

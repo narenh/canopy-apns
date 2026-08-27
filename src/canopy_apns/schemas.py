@@ -14,9 +14,9 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
-from .config import MAX_DATA_BYTES, MAX_SUBTITLE_LENGTH, MAX_TITLE_LENGTH
+from .config import MAX_BODY_LENGTH, MAX_DATA_BYTES, MAX_TITLE_LENGTH
 
 
 class PushRequest(BaseModel):
@@ -41,7 +41,25 @@ class PushRequest(BaseModel):
     knows which its app is; the relay has no way to tell by looking."""
 
     title: str = Field(min_length=1, max_length=MAX_TITLE_LENGTH)
-    subtitle: str | None = Field(default=None, max_length=MAX_SUBTITLE_LENGTH)
+    """The bold first line."""
+
+    body: str | None = Field(
+        default=None,
+        max_length=MAX_BODY_LENGTH,
+        validation_alias=AliasChoices("body", "subtitle"),
+    )
+    """The regular-weight second line.
+
+    Called ``subtitle`` until it turned out that iOS bolds an alert's subtitle
+    as well as its title, so every Canopy+ notification arrived as two bold
+    lines while Messages and Mail put their second line in ``body`` and got
+    normal weight.  The field is ``body`` now, for the APNs key it becomes.
+
+    ``subtitle`` stays accepted as an alias rather than being removed, because
+    ``extra="forbid"`` means dropping it would turn every push from a client
+    that has not been redeployed yet into a 422 — and the two services deploy
+    separately.  Either name sets the same field and produces the same alert.
+    """
 
     data: dict[str, Any] | None = None
     """Opaque to the relay, forwarded under a ``canopy`` key for the app to
@@ -85,6 +103,37 @@ class PushResponse(BaseModel):
     """Apple's id for the push, for correlating with their delivery console."""
 
 
+class EnrollResponse(BaseModel):
+    """``POST /v1/instances`` — a freshly issued identity.
+
+    The only time the relay ever discloses an API key. There is no way to read
+    one back afterwards, because there is nowhere it was written down: a caller
+    that loses its key enrolls again and gets a new identity, which costs
+    nothing but the old id lingering in a revocation list nobody will ever need
+    to write.
+
+    Takes no request body. There is nothing an enrolling instance could tell
+    the relay that the relay would have any way to verify, and asking for a name
+    or a URL would only create a field that lies.
+    """
+
+    instance_id: str
+    """Shown in the instance's admin UI and in this relay's logs, so a support
+    conversation has something to name. Not a secret."""
+
+    api_key: str
+    """Send as ``Authorization: Bearer``. Store it; it is not recoverable."""
+
+    bundle_id: str | None = None
+    """The topic this relay pushes to, so the caller can display it without a
+    second round trip to ``/v1/verify``."""
+
+    ready: bool = True
+    """False when the relay has no signing key of its own yet. The enrollment
+    still succeeded and the key is still good — there is simply nothing behind
+    it until the operator finishes setting the relay up."""
+
+
 class VerifyResponse(BaseModel):
     """``GET /v1/verify`` — what an instance's admin page needs to show.
 
@@ -120,6 +169,7 @@ class ErrorResponse(BaseModel):
 
 
 __all__ = [
+    "EnrollResponse",
     "ErrorResponse",
     "HealthResponse",
     "PushRequest",

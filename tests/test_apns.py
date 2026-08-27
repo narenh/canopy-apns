@@ -103,21 +103,31 @@ def test_invalidating_forces_a_fresh_mint(credentials: ApnsCredentials) -> None:
 
 
 def test_payload_is_a_plain_alert() -> None:
-    payload = build_payload(title="A Title", subtitle="A Subtitle", data=None)
+    payload = build_payload(title="A Title", body="A second line", data=None)
     assert payload == {
-        "aps": {"alert": {"title": "A Title", "subtitle": "A Subtitle"}, "sound": "default"}
+        "aps": {"alert": {"title": "A Title", "body": "A second line"}, "sound": "default"}
     }
+
+
+def test_the_second_line_is_body_so_ios_does_not_bold_it() -> None:
+    """iOS bolds `title` and `subtitle` alike; only `body` is regular weight.
+
+    Built as title+subtitle, every notification arrived as two bold lines and
+    looked like shouting beside Messages and Mail on the same lock screen.
+    """
+    payload = build_payload(title="A Title", body="A second line", data=None)
+    assert "subtitle" not in payload["aps"]["alert"]
 
 
 def test_instance_data_rides_beside_aps_not_inside_it() -> None:
     """So a malformed blob is the app's problem, never an APNs rejection."""
-    payload = build_payload(title="T", subtitle=None, data={"imdb_id": "tt1"})
+    payload = build_payload(title="T", body=None, data={"imdb_id": "tt1"})
     assert payload["canopy"] == {"imdb_id": "tt1"}
     assert "canopy" not in payload["aps"]
 
 
-def test_an_absent_subtitle_is_omitted_rather_than_empty() -> None:
-    payload = build_payload(title="T", subtitle=None, data=None)
+def test_an_absent_second_line_is_omitted_rather_than_empty() -> None:
+    payload = build_payload(title="T", body=None, data=None)
     assert payload["aps"]["alert"] == {"title": "T"}
 
 

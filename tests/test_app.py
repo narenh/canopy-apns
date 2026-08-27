@@ -48,6 +48,45 @@ async def test_the_root_explains_itself_rather_than_404ing(client: AsyncClient) 
     assert response.json()["service"] == "canopy-apns"
 
 
+async def test_a_browser_gets_the_diagnostic_page(client: AsyncClient) -> None:
+    response = await client.get("/", headers={"Accept": "text/html"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "canopy-apns" in response.text
+
+
+async def test_the_page_reports_the_scheme_and_forwarding_headers(
+    client: AsyncClient,
+) -> None:
+    """The whole point of the page: what the relay thinks it was reached over."""
+    response = await client.get(
+        "/",
+        headers={"Accept": "text/html", "X-Forwarded-Proto": "https"},
+    )
+    assert 'data-scheme="http"' in response.text
+    # Named so the operator can see the header arrived even though the app
+    # still resolved http — that gap is the bug this page is for.
+    assert "X-Forwarded-Proto" in response.text or "x-forwarded-proto" in response.text
+    assert "https" in response.text
+
+
+async def test_the_page_escapes_header_values(client: AsyncClient) -> None:
+    """Every value on the page came from a header, so none of it is trusted."""
+    response = await client.get(
+        "/",
+        headers={"Accept": "text/html", "X-Forwarded-For": "<script>alert(1)</script>"},
+    )
+    assert "<script>alert(1)</script>" not in response.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in response.text
+
+
+async def test_the_page_reports_an_unconfigured_relay(
+    unconfigured_client: AsyncClient,
+) -> None:
+    response = await unconfigured_client.get("/", headers={"Accept": "text/html"})
+    assert "not configured" in response.text
+
+
 # ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
@@ -158,7 +197,7 @@ async def test_a_push_is_forwarded_to_apple(
 
     response = await client.post(
         "/v1/push",
-        json={**PUSH, "subtitle": "Requested by Robin Example", "data": {"imdb_id": "tt1"}},
+        json={**PUSH, "body": "Requested by Robin Example", "data": {"imdb_id": "tt1"}},
         headers=auth,
     )
 
@@ -172,9 +211,34 @@ async def test_a_push_is_forwarded_to_apple(
     payload = json.loads(route.calls[0].request.read())
     assert payload["aps"]["alert"] == {
         "title": PUSH["title"],
-        "subtitle": "Requested by Robin Example",
+        "body": "Requested by Robin Example",
     }
     assert payload["canopy"] == {"imdb_id": "tt1"}
+
+
+@respx.mock
+async def test_the_old_subtitle_field_still_works(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    """`subtitle` was the field's name before iOS's bolding was noticed.
+
+    The two services deploy separately and the schema forbids unknown fields,
+    so removing the old name outright would turn every push from a client that
+    has not been redeployed into a 422. It aliases onto `body` and produces the
+    same alert.
+    """
+    route = _apns_route().mock(return_value=httpx.Response(200))
+
+    response = await client.post(
+        "/v1/push",
+        json={**PUSH, "subtitle": "Requested by Robin Example"},
+        headers=auth,
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(route.calls[0].request.read())
+    assert payload["aps"]["alert"]["body"] == "Requested by Robin Example"
+    assert "subtitle" not in payload["aps"]["alert"]
 
 
 @respx.mock
@@ -331,3 +395,128 @@ async def test_verify_does_not_spend_the_push_budget(
             pushed = await client.post("/v1/push", json=PUSH, headers=headers)
 
     assert pushed.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Enrollment
+# ---------------------------------------------------------------------------
+
+
+async def test_enrolling_issues_a_working_key(client: AsyncClient) -> None:
+    """The whole point: an instance gets a usable identity with no human in it."""
+    response = await client.post("/v1/instances")
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["instance_id"]
+    assert body["api_key"].startswith(f"canopy_{body['instance_id']}_")
+    assert body["bundle_id"] == BUNDLE_ID
+    assert body["ready"] is True
+
+    # The key it just handed out must actually authenticate.
+    verified = await client.get(
+        "/v1/verify", headers={"Authorization": f"Bearer {body['api_key']}"}
+    )
+    assert verified.status_code == 200
+    assert verified.json()["instance"] == body["instance_id"]
+
+
+async def test_enrolling_needs_no_authentication(client: AsyncClient) -> None:
+    """A caller with no key is exactly who this endpoint is for."""
+    assert (await client.post("/v1/instances")).status_code == 201
+
+
+async def test_each_enrollment_is_a_distinct_instance(client: AsyncClient) -> None:
+    first = (await client.post("/v1/instances")).json()
+    second = (await client.post("/v1/instances")).json()
+
+    assert first["instance_id"] != second["instance_id"]
+    assert first["api_key"] != second["api_key"]
+
+
+async def test_enrolling_against_an_unready_relay_still_issues_a_key(
+    unconfigured_client: AsyncClient,
+) -> None:
+    """The key is good; the relay simply has nothing behind it yet.
+
+    Failing here would make an instance's setup depend on the relay operator
+    having finished theirs, for no gain — the key works the moment they do.
+    """
+    response = await unconfigured_client.post("/v1/instances")
+
+    assert response.status_code == 201
+    assert response.json()["ready"] is False
+    assert response.json()["api_key"]
+
+
+async def test_enrollment_can_be_switched_off(credentials: ApnsCredentials) -> None:
+    """The door an operator can close in one redeploy if this is ever abused."""
+    app = create_app(
+        settings=Settings(
+            apns=credentials,
+            signing_secret=SIGNING_SECRET,
+            enrollment_enabled=False,
+        )
+    )
+
+    async with LifespanManager(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://relay"
+        ) as client:
+            response = await client.post("/v1/instances")
+
+    assert response.status_code == 403
+    assert "not issuing new keys" in response.json()["detail"]
+
+
+async def test_enrollment_is_rate_limited_per_address(
+    credentials: ApnsCredentials,
+) -> None:
+    """Keys are free, so this is what actually stops someone minting ten thousand."""
+    app = create_app(
+        settings=Settings(
+            apns=credentials,
+            signing_secret=SIGNING_SECRET,
+            enrollment_per_hour=10,
+            enrollment_burst=2,
+        )
+    )
+
+    async with LifespanManager(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://relay"
+        ) as client:
+            statuses = [
+                (await client.post("/v1/instances")).status_code for _ in range(3)
+            ]
+            refused = await client.post("/v1/instances")
+
+    assert statuses == [201, 201, 429]
+    assert int(refused.headers["retry-after"]) >= 1
+
+
+@respx.mock
+async def test_enrollment_does_not_spend_the_push_budget(
+    credentials: ApnsCredentials,
+) -> None:
+    """Two limiters, two key spaces: enrolling must not cost anyone a push."""
+    _apns_route().mock(return_value=httpx.Response(200))
+    app = create_app(
+        settings=Settings(
+            apns=credentials,
+            signing_secret=SIGNING_SECRET,
+            rate_limit_per_minute=60,
+            rate_burst=1,
+        )
+    )
+
+    async with LifespanManager(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://relay"
+        ) as client:
+            enrolled = (await client.post("/v1/instances")).json()
+            headers = {"Authorization": f"Bearer {enrolled['api_key']}"}
+            pushed = await client.post("/v1/push", json=PUSH, headers=headers)
+
+    assert pushed.status_code == 200
+    assert pushed.json()["result"] == "delivered"

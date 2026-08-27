@@ -26,11 +26,22 @@ from dataclasses import dataclass, field
 DEFAULT_RATE_LIMIT_PER_MINUTE = 120
 DEFAULT_RATE_BURST = 30
 
+#: Enrollments one source address may make per hour, and how many may be
+#: bunched together.  Deliberately generous for a real deployment (an instance
+#: enrolls once, ever) and deliberately finite, because self-service keys are
+#: free and this is the only thing standing between that and someone minting
+#: ten thousand of them.
+DEFAULT_ENROLLMENT_PER_HOUR = 10
+DEFAULT_ENROLLMENT_BURST = 5
+
 #: Longest payload strings the relay will forward.  APNs caps the whole
 #: notification at 4KB; these keep any one field from eating it, and keep the
 #: relay from being used as a general-purpose message bus.
 MAX_TITLE_LENGTH = 200
-MAX_SUBTITLE_LENGTH = 200
+MAX_BODY_LENGTH = 200
+"""The second line of the alert.  Named for the APNs field it becomes — see
+:func:`canopy_apns.apns.build_payload` for why that is ``body`` and not
+``subtitle``."""
 MAX_DATA_BYTES = 1024
 
 
@@ -44,6 +55,26 @@ class ConfigError(Exception):
 
 def _clean(name: str) -> str:
     return (os.environ.get(name) or "").strip()
+
+
+def _flag(name: str, *, default: bool) -> bool:
+    """A boolean environment variable, read forgivingly.
+
+    Anything recognisably negative turns it off; anything recognisably positive
+    turns it on; an unset or unrecognised value leaves the default alone. An
+    operator who writes ``no`` where the docs said ``false`` should get what
+    they meant, not silently the opposite.
+    """
+    raw = _clean(name).lower()
+    if not raw:
+        return default
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    raise ConfigError(
+        f"{name} must be true or false, got {raw!r}"
+    )
 
 
 def _int(name: str, default: int) -> int:
@@ -160,6 +191,18 @@ class Settings:
     rate_limit_per_minute: int = DEFAULT_RATE_LIMIT_PER_MINUTE
     rate_burst: int = DEFAULT_RATE_BURST
 
+    enrollment_enabled: bool = True
+    """Whether ``POST /v1/instances`` will issue new keys.
+
+    On by default — an instance admin ticking a checkbox must not have to think
+    about API keys, which is the whole point of the endpoint.  It is a switch
+    rather than a constant so that an operator watching enrollment abuse can
+    shut the door in one redeploy without taking notifications away from every
+    instance already running."""
+
+    enrollment_per_hour: int = DEFAULT_ENROLLMENT_PER_HOUR
+    enrollment_burst: int = DEFAULT_ENROLLMENT_BURST
+
     apns_timeout_seconds: float = 10.0
 
     extra: dict[str, str] = field(default_factory=dict)
@@ -174,13 +217,85 @@ class Settings:
         return instance_id in self.revoked_instances
 
 
+#: Shortest signing secret the relay will start with.  Every instance API key
+#: is an HMAC under this value, so its entropy is the entropy of every key ever
+#: issued.  :func:`canopy_apns.keys.generate_secret` produces 64 characters;
+#: this floor only rules out something typed by hand.
+MIN_SIGNING_SECRET_LENGTH = 32
+
+#: Substrings that mark a signing secret as boilerplate rather than a secret,
+#: matched case-insensitively.  The first entry is not hypothetical: Coolify
+#: reads ``${VAR:?message}`` in a compose file as a *default* rather than as
+#: compose's "abort if unset", so a deployment came up with its signing secret
+#: set to the literal words ``set this in Coolify`` — public, non-empty, and
+#: therefore indistinguishable from a real secret to a check that only asks
+#: whether the value is blank.
+_PLACEHOLDER_MARKERS = (
+    "set this",
+    "changeme",
+    "change me",
+    "change this",
+    "replace this",
+    "your secret",
+    "your-secret",
+    "secret here",
+    "placeholder",
+    "example",
+    "todo",
+)
+
+
+def _check_signing_secret(value: str) -> None:
+    """Refuse a signing secret that is present but not actually a secret.
+
+    Absent was always caught.  What was not: a value that is *there* and
+    worthless, which is the state a deploy tool's placeholder leaves behind and
+    the one that fails silently — the relay boots, serves, mints keys, and
+    every one of them is forgeable by anyone who can read the repo.
+
+    So three cheap questions, each ruling out something a generated secret can
+    never be.  Whitespace: :func:`~canopy_apns.keys.generate_secret` emits
+    URL-safe base64 and nothing else, while every placeholder that has actually
+    turned up is an English phrase.  Length: below
+    :data:`MIN_SIGNING_SECRET_LENGTH` it is hand-typed whatever it says.
+    Known boilerplate: the phrases in :data:`_PLACEHOLDER_MARKERS`.
+
+    A deployment already running on a weak secret will crash-loop on its next
+    redeploy rather than quietly carrying on, which is the intent: the fix is a
+    rotation it needed regardless, and the alternative is a fleet that never
+    finds out.
+    """
+    if any(character.isspace() for character in value):
+        raise ConfigError(
+            "CANOPY_APNS_SIGNING_SECRET contains whitespace, so it is almost "
+            "certainly placeholder text rather than a secret. Generate a real "
+            "one with `python -m canopy_apns secret`."
+        )
+
+    lowered = value.lower()
+    if any(marker in lowered for marker in _PLACEHOLDER_MARKERS):
+        raise ConfigError(
+            "CANOPY_APNS_SIGNING_SECRET still looks like placeholder text. "
+            "Every instance API key is an HMAC under this value, so a "
+            "guessable one lets anyone mint keys. Generate a real one with "
+            "`python -m canopy_apns secret`."
+        )
+
+    if len(value) < MIN_SIGNING_SECRET_LENGTH:
+        raise ConfigError(
+            f"CANOPY_APNS_SIGNING_SECRET is {len(value)} characters; the "
+            f"minimum is {MIN_SIGNING_SECRET_LENGTH}. Generate one with "
+            "`python -m canopy_apns secret`, which produces 64."
+        )
+
+
 def load_settings() -> Settings:
     """Build :class:`Settings` from the process environment.
 
     Raises :class:`ConfigError` when the environment is unusable — which for
-    the signing secret means *absent*, since without it no API key can be
-    verified and every request would be rejected anyway.  Failing at startup
-    with one sentence beats serving nothing but 401s.
+    the signing secret means absent, and also means present-but-boilerplate:
+    see :func:`_check_signing_secret`.  Failing at startup with one sentence
+    beats serving nothing but 401s, and beats serving forgeable keys silently.
     """
     signing_secret = _clean("CANOPY_APNS_SIGNING_SECRET")
     if not signing_secret:
@@ -189,6 +304,7 @@ def load_settings() -> Settings:
             "`python -m canopy_apns secret` and set it on the deployment; "
             "every instance API key is derived from it."
         )
+    _check_signing_secret(signing_secret)
 
     revoked = {
         part.strip().lower()
@@ -202,15 +318,25 @@ def load_settings() -> Settings:
         revoked_instances=frozenset(revoked),
         rate_limit_per_minute=_int("CANOPY_APNS_RATE_LIMIT", DEFAULT_RATE_LIMIT_PER_MINUTE),
         rate_burst=_int("CANOPY_APNS_RATE_BURST", DEFAULT_RATE_BURST),
+        enrollment_enabled=_flag("CANOPY_APNS_ENROLLMENT_ENABLED", default=True),
+        enrollment_per_hour=_int(
+            "CANOPY_APNS_ENROLLMENT_PER_HOUR", DEFAULT_ENROLLMENT_PER_HOUR
+        ),
+        enrollment_burst=_int(
+            "CANOPY_APNS_ENROLLMENT_BURST", DEFAULT_ENROLLMENT_BURST
+        ),
     )
 
 
 __all__ = [
+    "DEFAULT_ENROLLMENT_BURST",
+    "DEFAULT_ENROLLMENT_PER_HOUR",
     "DEFAULT_RATE_BURST",
     "DEFAULT_RATE_LIMIT_PER_MINUTE",
+    "MAX_BODY_LENGTH",
     "MAX_DATA_BYTES",
-    "MAX_SUBTITLE_LENGTH",
     "MAX_TITLE_LENGTH",
+    "MIN_SIGNING_SECRET_LENGTH",
     "ApnsCredentials",
     "ConfigError",
     "Settings",
