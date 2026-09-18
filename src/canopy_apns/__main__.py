@@ -31,14 +31,32 @@ import sys
 from .keys import generate_secret, mint
 
 
+def _setting(name: str, default: str) -> str:
+    """One of the serve-time environment variables, treating blank as unset.
+
+    ``os.environ.get(name, default)`` is wrong here, and wrong in the way that
+    only shows up in production: it returns the default when the variable is
+    *absent*, and an empty string when it is present and empty.  A deploy UI
+    that renders a variable as a form field produces the second state every
+    time someone leaves the field alone, so the default never applies and the
+    value reaches uvicorn as ``""`` — which is a ``KeyError`` for ``log_level``
+    and a ``ValueError`` for ``port``, both at startup, both a crash loop.
+
+    :mod:`canopy_apns.config` already reads everything through its own
+    ``_clean``; this is the same rule for the handful of settings consumed
+    before a :class:`~canopy_apns.config.Settings` exists.
+    """
+    return (os.environ.get(name) or "").strip() or default
+
+
 def _serve() -> int:
     import uvicorn
 
     from .app import create_app
 
-    host = os.environ.get("CANOPY_APNS_HOST", "0.0.0.0")  # noqa: S104 - containerised
-    port = int(os.environ.get("CANOPY_APNS_PORT", "9247"))
-    log_level = os.environ.get("CANOPY_APNS_LOG_LEVEL", "info")
+    host = _setting("CANOPY_APNS_HOST", "0.0.0.0")  # noqa: S104 - containerised
+    port = int(_setting("CANOPY_APNS_PORT", "9247"))
+    log_level = _setting("CANOPY_APNS_LOG_LEVEL", "info")
     # Enrollment is rate-limited per source address, so the app has to see the
     # real client rather than the proxy in front of it. Letting uvicorn apply
     # `X-Forwarded-For` means `request.client.host` is already correct and no
@@ -48,7 +66,13 @@ def _serve() -> int:
     # overwrites it and wrong if the port is reachable directly — a client
     # could then claim any address it liked and get a fresh bucket per request.
     # Narrow it to the proxy's address if this is ever exposed unproxied.
-    forwarded_allow_ips = os.environ.get("CANOPY_APNS_FORWARDED_ALLOW_IPS", "*")
+    #
+    # Blank falls back to `*` rather than to "trust nobody", because blank here
+    # means an untouched field, not a decision. Trusting nobody would silently
+    # bucket every enrollment under the proxy's own address — one shared
+    # bucket for the internet, which fails closed in a way nobody would notice
+    # until enrollment started refusing strangers.
+    forwarded_allow_ips = _setting("CANOPY_APNS_FORWARDED_ALLOW_IPS", "*")
 
     uvicorn.run(
         create_app(),
