@@ -382,17 +382,23 @@ Buckets for instances that have gone quiet are dropped after an hour of idleness
 1. **New resource → Docker Compose**, pointed at this repository. `build: .` is
    already in `docker-compose.yml`; nothing is published to a registry.
 2. **Assign the domain** `apns.canopysf.com`. Coolify fills in
-   `SERVICE_FQDN_CANOPYAPNS_8080` and wires up its proxy and TLS certificate.
+   `SERVICE_FQDN_CANOPYAPNS_9247` and wires up its proxy and TLS certificate.
    The compose file uses `expose`, not `ports`, so the container is reachable
    only through that proxy.
-3. **Set the environment variables** in Coolify. Mark
-   `CANOPY_APNS_SIGNING_SECRET` and `CANOPY_APNS_PRIVATE_KEY` as secrets, and as
-   build-time-hidden. Generate the signing secret once:
+3. **Set the environment variables** in Coolify. [`.env.example`](.env.example)
+   is the whole list with every value blank and a note on each; Coolify's
+   variable editor takes a bulk `.env` paste, so paste it in and fill the five
+   blanks. Mark `CANOPY_APNS_SIGNING_SECRET` and `CANOPY_APNS_PRIVATE_KEY` as
+   secrets, and as build-time-hidden. Generate the signing secret once:
 
    ```console
-   $ docker run --rm ghcr.io/…/canopy-apns secret     # or, locally:
-   $ python -m canopy_apns secret
+   $ python -m canopy_apns secret                     # anywhere with the repo
+   $ docker compose run --rm canopy-apns secret       # or from the image
    ```
+
+   It is 64 URL-safe base64 characters and it is not derived from anything, so
+   it can be generated on your laptop and pasted in; nothing about where it was
+   made matters.
 
    **Check what actually landed in the field.** Coolify prefills environment
    variables from the compose file, and it reads `${VAR:?message}` — compose's
@@ -404,10 +410,22 @@ Buckets for instances that have gone quiet are dropped after an hour of idleness
    a relay that will not boot is strictly better than one minting forgeable
    keys.
 
-4. **Deploy.** Check `GET /health` says `"apns": "configured"`. If it says
-   `unconfigured`, one of the four APNs variables is missing or blank — the
-   service treats three-out-of-four as not configured, deliberately, because
-   three cannot send anything.
+4. **Deploy**, then check it from outside:
+
+   ```console
+   $ curl https://apns.canopysf.com/health
+   {"status":"ok","apns":"configured"}
+
+   $ curl -X POST https://apns.canopysf.com/v1/instances
+   {"instance_id":"…","api_key":"canopy_…","bundle_id":"com.example.canopy","ready":true}
+   ```
+
+   `"apns": "unconfigured"` means one of the four APNs variables is missing or
+   blank — the service treats three-out-of-four as not configured, deliberately,
+   because three cannot send anything. If the container is up but the domain is
+   not answering at all, the problem is the proxy rather than the app, and
+   [the browser page at `/`](#checking-tls-and-the-proxy-from-a-browser) is
+   built to say which.
 5. **Nothing else.** Instances enrol themselves through `POST /v1/instances`
    the moment their admin switches notifications on. Use
    `python -m canopy_apns mint <id>` only if you want to hand someone a stable

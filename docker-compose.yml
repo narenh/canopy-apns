@@ -20,10 +20,16 @@ services:
       # reads it.
       SERVICE_FQDN_CANOPYAPNS_9247: /
 
+      # Pinned, not `${...}`: the port is also baked into the variable NAME
+      # above, so the two cannot drift apart by being set independently.
+      # Changing the port means changing both lines.
       CANOPY_APNS_HOST: 0.0.0.0
       CANOPY_APNS_PORT: "9247"
-      CANOPY_APNS_LOG_LEVEL: info
       TZ: UTC
+
+      # Overridable, because turning up logging to chase a problem should not
+      # be a file edit.
+      CANOPY_APNS_LOG_LEVEL: ${CANOPY_APNS_LOG_LEVEL:-info}
 
       # --- Set these in Coolify, not here. ------------------------------------
       # Every instance API key is an HMAC over its instance id using this
