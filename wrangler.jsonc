@@ -1,0 +1,32 @@
+// Cloudflare Workers configuration for the canopy-apns relay.
+//
+// Secrets are not in here and never should be: set them with
+// `wrangler secret put <NAME>` (see README.md, "Deploying"). Plain settings
+// such as rate limits can be set in the dashboard; `keep_vars` stops a deploy
+// from wiping them.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "canopy-apns",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "keep_vars": true,
+
+  // Serve on a custom domain once it is pointed at Cloudflare. Until then the
+  // Worker answers on its workers.dev URL.
+  // "routes": [{ "pattern": "apns.canopysf.com", "custom_domain": true }],
+
+  "durable_objects": {
+    "bindings": [
+      // One instance, holding the current APNs provider JWT for every isolate.
+      { "name": "PROVIDER_TOKEN", "class_name": "ProviderTokenStore" },
+      // One instance per rate-limit bucket: push:<instance-id>, enroll:<address>.
+      { "name": "RATE_LIMITER", "class_name": "RateLimiter" }
+    ]
+  },
+  "migrations": [
+    // SQLite-backed, which is what the Workers free plan supports.
+    { "tag": "v1", "new_sqlite_classes": ["ProviderTokenStore", "RateLimiter"] }
+  ],
+
+  "observability": { "enabled": true }
+}

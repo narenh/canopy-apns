@@ -1,5 +1,10 @@
 # canopy-apns
 
+> **Superseded.** This is the Python/FastAPI relay as it ran on Coolify, kept
+> unchanged for reference and as a fallback. The Cloudflare Worker at the
+> repository root replaces it; see [`../README.md`](../README.md).
+> Every command below assumes this directory as the working directory.
+
 A public APNs forwarder for self-hosted Canopy+ instances.
 
 One Apple Developer account owns the app, so one signing key can push to it.

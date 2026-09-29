@@ -1,0 +1,13 @@
+# Local secrets for `npm run dev`. Copy to .dev.vars (gitignored) and fill in.
+# In production these are set with `wrangler secret put`, never in a file.
+
+# Generate with `npm run secret`.
+CANOPY_APNS_SIGNING_SECRET=
+
+# Optional locally: without these the relay runs "unconfigured" and refuses
+# pushes with a 503, which is enough to exercise enrollment and verify.
+CANOPY_APNS_TEAM_ID=
+CANOPY_APNS_KEY_ID=
+CANOPY_APNS_BUNDLE_ID=
+# The .p8, as base64 of the whole file on one line: `base64 -w0 AuthKey_X.p8`
+CANOPY_APNS_PRIVATE_KEY=

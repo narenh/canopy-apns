@@ -1,0 +1,26 @@
+{
+  "name": "canopy-apns",
+  "version": "2.0.0",
+  "private": true,
+  "description": "A stateless APNs forwarder for self-hosted Canopy+ instances, on Cloudflare Workers",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types --include-runtime false",
+    "secret": "node --experimental-strip-types --no-warnings scripts/cli.ts secret",
+    "mint": "node --experimental-strip-types --no-warnings scripts/cli.ts mint"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260929.1",
+    "@types/node": "^26.6.3",
+    "@vitest/runner": "^4.1.11",
+    "@vitest/snapshot": "^4.1.11",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.143.1"
+  }
+}

@@ -13,3 +13,8 @@ htmlcov/
 # environment; there is no reason for one to exist in the working tree.
 *.p8
 .env
+
+# Worker
+node_modules/
+.wrangler/
+.dev.vars
