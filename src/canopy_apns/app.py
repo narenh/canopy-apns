@@ -1,8 +1,8 @@
 """The relay application.
 
-Four endpoints and no database.  The whole of the service is: check the API
-key, spend a rate-limit token, build an alert payload, sign a JWT, POST it to
-Apple, report what happened.
+A handful of endpoints and no database.  The whole of the service is: check
+the API key, spend a rate-limit token, build an alert (or Live Activity)
+payload, sign a JWT, POST it to Apple, report what happened.
 
 The one thing worth stating loudly, because the whole isolation story rests on
 it: **the relay never stores a device token and never learns which instance a
@@ -21,6 +21,7 @@ looks one up, or reports whether one is known.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -34,15 +35,24 @@ from .apns import (
     ApnsClient,
     ApnsConfigError,
     ProviderTokenCache,
+    SendResult,
+    build_live_activity_payload,
+    encoded_payload_size,
     validate_private_key,
 )
-from .config import Settings, load_settings
+from .config import (
+    MAX_LIVE_ACTIVITY_PAYLOAD_BYTES,
+    ApnsCredentials,
+    Settings,
+    load_settings,
+)
 from .keys import Instance, InvalidKey, generate_instance_id, mint, verify
 from .landing import render_landing, wants_html
 from .ratelimit import RateLimiter
 from .schemas import (
     EnrollResponse,
     HealthResponse,
+    LiveActivityRequest,
     PushRequest,
     PushResponse,
     VerifyResponse,
@@ -128,6 +138,55 @@ def authenticate(request: Request, state: StateDep) -> Instance:
 
 
 InstanceDep = Annotated[Instance, Depends(authenticate)]
+
+
+def _spend_push_budget(state: RelayState, instance: Instance) -> None:
+    """Take one token from ``instance``'s push bucket, or refuse with a 429.
+
+    One bucket for both push endpoints: an alert and a Live Activity update
+    are both one request to Apple under the operator's key.
+    """
+    limiter = state.limiter
+    if limiter is None:
+        return
+    decision = limiter.check(instance.id)
+    if not decision.allowed:
+        logger.info("rate-limited instance %s", instance.id)
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many notifications. Slow down and try again shortly.",
+            headers={"Retry-After": str(decision.retry_after_seconds)},
+        )
+
+
+def _require_credentials(state: RelayState) -> ApnsCredentials:
+    credentials = state.settings.apns
+    if credentials is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "This relay has no APNs signing key configured yet. Nothing is "
+            "wrong with your API key; the relay operator has to fix this.",
+        )
+    return credentials
+
+
+def _unusable_key(exc: ApnsConfigError) -> HTTPException:
+    # The key parsed at startup, so reaching here means it changed underneath
+    # us. Every push would fail the same way; say so.
+    logger.error("APNs credentials are unusable: %s", exc)
+    return HTTPException(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "This relay's APNs signing key is not usable. The relay "
+        "operator has to fix this.",
+    )
+
+
+def _response(result: SendResult) -> PushResponse:
+    return PushResponse(
+        result=result.outcome.value,
+        reason=result.reason,
+        apns_id=result.apns_id,
+    )
 
 
 def create_app(*, settings: Settings | None = None) -> FastAPI:
@@ -308,24 +367,8 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
         and burying that answer in a 502 alongside genuine faults is how a
         table fills up with tokens Apple stopped accepting months ago.
         """
-        limiter = state.limiter
-        if limiter is not None:
-            decision = limiter.check(instance.id)
-            if not decision.allowed:
-                logger.info("rate-limited instance %s", instance.id)
-                raise HTTPException(
-                    status.HTTP_429_TOO_MANY_REQUESTS,
-                    "Too many notifications. Slow down and try again shortly.",
-                    headers={"Retry-After": str(decision.retry_after_seconds)},
-                )
-
-        credentials = state.settings.apns
-        if credentials is None:
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                "This relay has no APNs signing key configured yet. Nothing is "
-                "wrong with your API key; the relay operator has to fix this.",
-            )
+        _spend_push_budget(state, instance)
+        credentials = _require_credentials(state)
 
         client = ApnsClient(credentials, client=state.http, tokens=state.tokens)
         try:
@@ -339,14 +382,7 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
                 collapse_id=notification.collapse_id,
             )
         except ApnsConfigError as exc:
-            # The key parsed at startup, so reaching here means it changed
-            # underneath us. Every push would fail the same way; say so.
-            logger.error("APNs credentials are unusable: %s", exc)
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                "This relay's APNs signing key is not usable. The relay "
-                "operator has to fix this.",
-            ) from exc
+            raise _unusable_key(exc) from exc
 
         # Instance id and outcome, never the device token or the text. The
         # relay is a forwarder; a log that reconstructs what was forwarded
@@ -359,11 +395,111 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
             result.reason or "-",
         )
 
-        return PushResponse(
-            result=result.outcome.value,
-            reason=result.reason,
-            apns_id=result.apns_id,
+        return _response(result)
+
+    @app.post("/v1/liveactivity", response_model=PushResponse, tags=["relay"])
+    async def live_activity(
+        update: LiveActivityRequest, instance: InstanceDep, state: StateDep
+    ) -> PushResponse:
+        """Forward one Live Activity start, update or end to one token.
+
+        Same contract as ``/v1/push`` — 200 whenever Apple answered, the same
+        ``result`` words, the same rate-limit bucket — with two differences:
+
+        * **The topic is the caller's to name, so it is checked.** An instance
+          may only push to a bundle id the operator has paired with it in
+          ``CANOPY_APNS_LIVEACTIVITY_TOPICS``; anything else is a 403, before
+          any budget is spent. ``/v1/push`` has no such check because it can
+          only ever reach the relay's own bundle.
+        * **``BadDeviceToken`` is ``failed``, not ``unregistered``.** For an
+          activity token it is usually a sandbox/production mismatch, and
+          telling the caller to delete a token that works on the other host
+          would be wrong. See
+          :data:`canopy_apns.apns.LIVE_ACTIVITY_DEAD_TOKEN_REASONS`.
+        """
+        if not state.settings.may_push_live_activity(instance.id, update.bundle_id):
+            logger.warning(
+                "refused a live activity push: instance=%s bundle=%s not allowed",
+                instance.id,
+                update.bundle_id,
+            )
+            if not state.settings.live_activity_topics:
+                detail = (
+                    "This relay does not accept Live Activity pushes from any "
+                    "instance. The relay operator enables them per instance and "
+                    "bundle id in CANOPY_APNS_LIVEACTIVITY_TOPICS."
+                )
+            else:
+                detail = (
+                    f"Instance {instance.id} may not send Live Activity pushes "
+                    f"to {update.bundle_id}. The relay operator has to add "
+                    f"`{instance.id}:{update.bundle_id}` to "
+                    "CANOPY_APNS_LIVEACTIVITY_TOPICS."
+                )
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail)
+
+        payload = build_live_activity_payload(
+            event=update.event,
+            timestamp=update.timestamp if update.timestamp is not None else int(time.time()),
+            content_state=update.content_state,
+            attributes_type=update.attributes_type,
+            attributes=update.attributes,
+            alert=update.alert.model_dump() if update.alert is not None else None,
+            stale_date=update.stale_date,
+            dismissal_date=update.dismissal_date,
+            relevance_score=update.relevance_score,
         )
+        try:
+            size = encoded_payload_size(payload)
+        except ValueError:
+            # Python's JSON parser let NaN or Infinity in; they are not JSON
+            # and the encoder refuses them. Checked here, not in the schema,
+            # because FastAPI's validation 422 echoes the input back and fails
+            # to render a NaN, turning the refusal into a 500.
+            raise HTTPException(
+                422,
+                "content_state, attributes and relevance_score must not "
+                "contain NaN or Infinity.",
+            ) from None
+        if size > MAX_LIVE_ACTIVITY_PAYLOAD_BYTES:
+            raise HTTPException(
+                # A bare 422: the constant's name differs across Starlette
+                # versions and the older spelling is deprecated in newer ones.
+                422,
+                f"The Live Activity payload is {size} bytes once encoded; APNs "
+                f"accepts at most {MAX_LIVE_ACTIVITY_PAYLOAD_BYTES}. Trim "
+                "content_state or attributes.",
+            )
+
+        _spend_push_budget(state, instance)
+        credentials = _require_credentials(state)
+
+        client = ApnsClient(credentials, client=state.http, tokens=state.tokens)
+        try:
+            result = await client.send_live_activity(
+                device_token=update.device_token,
+                payload=payload,
+                bundle_id=update.bundle_id,
+                environment=update.environment,
+                priority=update.priority,
+                expiration=update.expiration,
+            )
+        except ApnsConfigError as exc:
+            raise _unusable_key(exc) from exc
+
+        # As for /v1/push: who, where and what happened — never the token or
+        # the content state. The bundle id is the operator's own configuration.
+        logger.info(
+            "liveactivity instance=%s bundle=%s env=%s event=%s result=%s reason=%s",
+            instance.id,
+            update.bundle_id,
+            update.environment,
+            update.event,
+            result.outcome.value,
+            result.reason or "-",
+        )
+
+        return _response(result)
 
     @app.get("/", include_in_schema=False)
     async def root(request: Request, state: StateDep) -> Response:

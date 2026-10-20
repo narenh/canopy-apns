@@ -21,7 +21,10 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import re
 from dataclasses import dataclass, field
+
+from .keys import INSTANCE_ID_PATTERN
 
 DEFAULT_RATE_LIMIT_PER_MINUTE = 120
 DEFAULT_RATE_BURST = 30
@@ -43,6 +46,12 @@ MAX_BODY_LENGTH = 200
 :func:`canopy_apns.apns.build_payload` for why that is ``body`` and not
 ``subtitle``."""
 MAX_DATA_BYTES = 1024
+
+#: Apple's cap on a Live Activity push, measured on the whole encoded payload.
+#: Unlike ``/v1/push`` the relay forwards caller-shaped ``content-state`` and
+#: ``attributes`` here, so the limit is checked on the bytes actually sent
+#: rather than approximated per field.
+MAX_LIVE_ACTIVITY_PAYLOAD_BYTES = 4096
 
 
 class ConfigError(Exception):
@@ -126,6 +135,54 @@ def normalise_private_key(raw: str) -> str:
     return text.replace("\\n", "\n")
 
 
+#: What a bundle id may look like: dot-separated segments of letters, digits
+#: and hyphens.  Loose on purpose — Apple is the authority on what is a real
+#: one — but tight enough that a stray colon or comma in the environment
+#: variable is caught at startup instead of becoming a topic nobody can match.
+BUNDLE_ID_PATTERN = r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$"
+_BUNDLE_ID_RE = re.compile(BUNDLE_ID_PATTERN)
+
+
+def parse_live_activity_topics(raw: str) -> frozenset[tuple[str, str]]:
+    """``CANOPY_APNS_LIVEACTIVITY_TOPICS`` into ``(instance_id, bundle_id)`` pairs.
+
+    The format is ``<instance_id>:<bundle_id>[,<instance_id>:<bundle_id>...]``.
+    Empty means no instance may send Live Activity pushes at all.
+
+    An allow-list rather than open to every instance, because a Live Activity
+    topic is a *different app's* topic: ``/v1/push`` only ever addresses the
+    relay's own bundle, while this names one per request, and the relay's key
+    signs for every app on the team.  Enrollment is open, so without a list any
+    stranger could enroll and spend the operator's key on any app it covers.
+
+    Instance ids are lowercased, as :func:`canopy_apns.keys.verify` produces
+    them; bundle ids are kept as written, since the topic is compared exactly.
+    A malformed entry is a :class:`ConfigError` rather than skipped — silently
+    dropping a pair would look exactly like the instance being refused for
+    some other reason.
+    """
+    pairs: set[tuple[str, str]] = set()
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        instance_id, sep, bundle_id = entry.partition(":")
+        instance_id = instance_id.strip().lower()
+        bundle_id = bundle_id.strip()
+        if (
+            not sep
+            or not INSTANCE_ID_PATTERN.match(instance_id)
+            or not _BUNDLE_ID_RE.match(bundle_id)
+        ):
+            raise ConfigError(
+                "CANOPY_APNS_LIVEACTIVITY_TOPICS must be a comma-separated list "
+                "of <instance_id>:<bundle_id> pairs, e.g. "
+                f"`a1b2c3:com.example.App`; could not read {entry!r}."
+            )
+        pairs.add((instance_id, bundle_id))
+    return frozenset(pairs)
+
+
 @dataclass(frozen=True)
 class ApnsCredentials:
     """The four values needed to sign and address a push.
@@ -205,6 +262,12 @@ class Settings:
 
     apns_timeout_seconds: float = 10.0
 
+    live_activity_topics: frozenset[tuple[str, str]] = frozenset()
+    """``(instance_id, bundle_id)`` pairs allowed on ``/v1/liveactivity``.
+
+    Empty — the default — means nobody.  See
+    :func:`parse_live_activity_topics` for why this is an allow-list."""
+
     extra: dict[str, str] = field(default_factory=dict)
     """Room for values a later version adds, so tests can build a Settings
     without every call site learning a new keyword."""
@@ -215,6 +278,9 @@ class Settings:
 
     def is_revoked(self, instance_id: str) -> bool:
         return instance_id in self.revoked_instances
+
+    def may_push_live_activity(self, instance_id: str, bundle_id: str) -> bool:
+        return (instance_id, bundle_id) in self.live_activity_topics
 
 
 #: Shortest signing secret the relay will start with.  Every instance API key
@@ -325,16 +391,21 @@ def load_settings() -> Settings:
         enrollment_burst=_int(
             "CANOPY_APNS_ENROLLMENT_BURST", DEFAULT_ENROLLMENT_BURST
         ),
+        live_activity_topics=parse_live_activity_topics(
+            _clean("CANOPY_APNS_LIVEACTIVITY_TOPICS")
+        ),
     )
 
 
 __all__ = [
+    "BUNDLE_ID_PATTERN",
     "DEFAULT_ENROLLMENT_BURST",
     "DEFAULT_ENROLLMENT_PER_HOUR",
     "DEFAULT_RATE_BURST",
     "DEFAULT_RATE_LIMIT_PER_MINUTE",
     "MAX_BODY_LENGTH",
     "MAX_DATA_BYTES",
+    "MAX_LIVE_ACTIVITY_PAYLOAD_BYTES",
     "MAX_TITLE_LENGTH",
     "MIN_SIGNING_SECRET_LENGTH",
     "ApnsCredentials",
@@ -342,4 +413,5 @@ __all__ = [
     "Settings",
     "load_settings",
     "normalise_private_key",
+    "parse_live_activity_topics",
 ]

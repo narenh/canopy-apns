@@ -100,7 +100,10 @@ mechanism.
   keys it issues. Enrollment computes a key and forgets it.
 - Accept a raw `aps` dictionary. An instance sends text; the relay decides the
   payload shape. Otherwise any instance could send a silent
-  `content-available` background wake signed with the operator's key.
+  `content-available` background wake signed with the operator's key. (Live
+  Activity pushes carry the caller's `content-state` and `attributes`, because
+  ActivityKit decodes them into the app's own types — but every other `aps` key
+  is still the relay's; see [`POST /v1/liveactivity`](#post-v1liveactivity).)
 - Fan out. One request, one device, one outcome. The instance owns its device
   list and what to do about each result.
 - Retry beyond one attempt. A stale provider token is re-minted and retried
@@ -121,6 +124,7 @@ Base URL in production: `https://apns.canopysf.com`.
 | `POST /v1/instances` | none | Self-service enrollment: issues an instance id and API key |
 | `GET /v1/verify` | Bearer | Confirm a key works; for an instance's settings page |
 | `POST /v1/push` | Bearer | Forward one notification to one device |
+| `POST /v1/liveactivity` | Bearer | Forward one Live Activity start, update or end to one token; allow-listed per instance |
 | `GET /` | none | Says what this is; in a browser, [a page showing what the relay saw](#checking-tls-and-the-proxy-from-a-browser) |
 
 Authentication is `Authorization: Bearer <instance-api-key>`. Every rejection is
@@ -211,6 +215,106 @@ That split matters most for `unregistered`. The relay stores no device tokens,
 so it cannot delete a dead one — only the instance can, and burying that answer
 in a 5xx alongside genuine faults is how a table fills up with tokens Apple
 stopped accepting months ago.
+
+### `POST /v1/liveactivity`
+
+Starts, updates or ends a Live Activity. Same authentication, same rate-limit
+bucket, same retry and provider-token handling, and the same response shape as
+`/v1/push` — but **off for everyone by default**: an instance may only push to
+a bundle id the operator has paired with it in
+[`CANOPY_APNS_LIVEACTIVITY_TOPICS`](#live-activity-topics).
+
+Every field, for reference — a real request would not combine `start` with
+`dismissal_date`, which is refused on anything but `end`:
+
+```jsonc
+{
+  "device_token": "a1b2…",              // hex; the activity's push token, or the
+                                         //   app's push-to-start token for "start"
+  "environment": "production",           // or "sandbox"
+  "bundle_id": "com.canopysf.CanopyControl", // the app; no topic suffix
+  "event": "start",                      // "start" | "update" | "end"
+  "content_state": { "progress": 0.5 },  // required; the app's ContentState
+  "attributes_type": "DownloadAttributes", // required for start, refused otherwise
+  "attributes": { "title": "…" },        // required for start ({} is fine), refused otherwise
+  "alert": { "title": "…", "body": "…" },// required for start; optional otherwise; ≤200 chars each
+  "timestamp": 1760000000,               // optional; unix seconds, default now
+  "stale_date": 1760003600,              // optional; unix seconds
+  "dismissal_date": 1760000900,          // optional; "end" only
+  "relevance_score": 50,                 // optional
+  "priority": 10,                        // 5 or 10; default 10
+  "expiration": 0                        // optional; unix seconds, default 0
+}
+```
+
+Becomes, at Apple, with absent optionals omitted rather than sent as `null`:
+
+```jsonc
+{
+  "aps": {
+    "timestamp": 1760000000,
+    "event": "start",
+    "content-state": { "progress": 0.5 },
+    "attributes-type": "DownloadAttributes",
+    "attributes": { "title": "…" },
+    "alert": { "title": "…", "body": "…" },
+    "stale-date": 1760003600,
+    "dismissal-date": 1760000900,
+    "relevance-score": 50.0
+  }
+}
+```
+
+| Request field | APNs |
+|---|---|
+| `timestamp` | `aps.timestamp` (relay's clock if omitted) |
+| `event` | `aps.event` |
+| `content_state` | `aps.content-state` |
+| `attributes_type` | `aps.attributes-type` |
+| `attributes` | `aps.attributes` |
+| `alert` | `aps.alert` |
+| `stale_date` | `aps.stale-date` |
+| `dismissal_date` | `aps.dismissal-date` |
+| `relevance_score` | `aps.relevance-score` |
+| `bundle_id` | header `apns-topic: <bundle_id>.push-type.liveactivity` |
+| `priority` | header `apns-priority` |
+| `expiration` | header `apns-expiration` |
+| — | header `apns-push-type: liveactivity` |
+
+The whole encoded payload must be **≤ 4096 bytes** (UTF-8, measured exactly as
+sent); anything larger is a 422 before Apple is contacted. The alert carries no
+`sound`; the relay sends only the fields above.
+
+```console
+$ curl https://apns.canopysf.com/v1/liveactivity \
+    -H "Authorization: Bearer canopy_a1b2c3_…" \
+    -H "Content-Type: application/json" \
+    -d '{"device_token":"80f1…","environment":"sandbox",
+         "bundle_id":"com.canopysf.CanopyControl","event":"update",
+         "content_state":{"progress":0.5,"label":"Downloading"}}'
+{"result":"delivered","reason":null,"apns_id":"…"}
+```
+
+Status codes are `/v1/push`'s, plus one:
+
+| Status | Meaning |
+|---|---|
+| `200` | Forwarded. Read `result` for what Apple said |
+| `401` | Bad, forged, or revoked API key |
+| `403` | This instance is not allowed this bundle id (or no instance is); the `detail` says which, and names the entry the operator would add |
+| `422` | Not a shape the relay will send, a start missing `attributes_type`/`attributes`/`alert`, or over 4096 bytes |
+| `429` | Over this instance's rate limit — the same bucket `/v1/push` spends |
+| `503` | The relay has no usable signing key |
+
+A 403 or 422 spends no rate-limit budget.
+
+**`BadDeviceToken` is `failed` here, not `unregistered`.** `result:
+"unregistered"` means "delete this token", and it is returned only for a 410,
+`Unregistered` or `DeviceTokenNotForTopic`. A `BadDeviceToken` on an activity
+token is usually a sandbox token sent to production (or the reverse), so it
+comes back as `{"result": "failed", "reason": "BadDeviceToken"}` and the caller
+should check its `environment` rather than drop the token. `/v1/push` is
+unchanged and still reports `BadDeviceToken` as `unregistered`.
 
 ### `GET /v1/verify`
 
@@ -331,6 +435,7 @@ because there is no storage for either to write to.
 | `CANOPY_APNS_PRIVATE_KEY` | for pushing | — | The `.p8` contents |
 | `CANOPY_APNS_PRIVATE_KEY_FILE` | — | — | Path to a mounted `.p8`, instead of the above |
 | `CANOPY_APNS_REVOKED_INSTANCES` | — | empty | Comma-separated instance ids to refuse |
+| `CANOPY_APNS_LIVEACTIVITY_TOPICS` | — | empty | `<instance_id>:<bundle_id>` pairs allowed on `/v1/liveactivity`; empty means nobody. See [below](#live-activity-topics) |
 | `CANOPY_APNS_RATE_LIMIT` | — | `120` | Pushes per minute per instance |
 | `CANOPY_APNS_RATE_BURST` | — | `30` | Bucket capacity, i.e. how large a burst is tolerated |
 | `CANOPY_APNS_ENROLLMENT_ENABLED` | — | `true` | Whether `POST /v1/instances` issues keys |
@@ -349,6 +454,36 @@ serving nothing but rejections.
 `"apns": "unconfigured"`, tells instances so on `/v1/verify`, and refuses pushes
 with a 503 that says whose problem it is. A fresh deployment waiting on its
 `.p8` is a supported state, not a crash loop.
+
+### Live Activity topics
+
+`/v1/push` can only ever reach the relay's own `CANOPY_APNS_BUNDLE_ID`.
+`/v1/liveactivity` names its bundle per request, and the relay's key signs for
+every app on the team, so with enrollment open to anyone it is an allow-list:
+
+```
+CANOPY_APNS_LIVEACTIVITY_TOPICS=a1b2c3:com.canopysf.CanopyControl,acme:com.example.App
+```
+
+- Comma-separated `<instance_id>:<bundle_id>` pairs. An instance may appear
+  more than once to be allowed several bundles.
+- The instance id is the one in its API key (`canopy_<instance_id>_…`, also
+  `instance` on `/v1/verify`), compared lowercased. The bundle id is compared
+  exactly and is written **without** the `.push-type.liveactivity` suffix.
+- Empty or unset: every `/v1/liveactivity` request is a 403.
+- A malformed entry stops startup with a message naming it, rather than being
+  skipped — a dropped pair would look exactly like a refusal for no reason.
+- A pair for a revoked instance does nothing; revocation is checked first.
+
+**The `.p8` must be valid for the Live Activity app's team.** The relay signs
+every push with its one key. An APNs key in the Apple Developer portal is
+team-scoped — it works for every app on that team — so a Live Activity bundle
+on the same team as `CANOPY_APNS_BUNDLE_ID` needs no new key. A bundle on a
+different team cannot be served by this relay: Apple rejects those pushes, and
+the relay reports them as `failed` with Apple's `reason`. If the key was
+created restricted to specific topics or to one environment rather than
+team-wide, check that it covers the new app and the environments its tokens
+come from.
 
 ### Pasting the `.p8`
 
@@ -478,6 +613,9 @@ The bundle id is the app's, and it must match the app the device tokens come
 from — Apple rejects a push whose topic does not match. Since every instance is
 pushing to the same app, that is one value for the whole relay, which is why it
 is a relay-level environment variable rather than something an instance sends.
+Live Activity pushes are the exception — they name their bundle per request,
+which is why [they are allow-listed](#live-activity-topics) — and the same key
+serves them as long as the app is on the same team.
 
 ---
 
@@ -533,7 +671,7 @@ src/canopy_apns/
   ratelimit.py   a token bucket per instance
   schemas.py     the wire contract, extra="forbid" throughout
   landing.py     the browser page at /: what the relay saw of your request
-  app.py         the four endpoints
+  app.py         the endpoints
   __main__.py    serve | secret | mint
 ```
 

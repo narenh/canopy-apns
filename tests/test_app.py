@@ -565,3 +565,80 @@ async def test_enrollment_does_not_spend_the_push_budget(
 
     assert pushed.status_code == 200
     assert pushed.json()["result"] == "delivered"
+
+
+# ---------------------------------------------------------------------------
+# /v1/push is pinned
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_push_headers_and_payload_are_pinned_byte_for_byte(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    """What cplus-server's alerts send today, frozen.
+
+    The APNs client grew a generic send path for Live Activities; this is the
+    guarantee that the alert path it now goes through is the one it always was.
+    """
+    route = _apns_route().mock(return_value=httpx.Response(200))
+
+    await client.post(
+        "/v1/push",
+        json={**PUSH, "body": "Requested by Robin Example", "collapse_id": "req-7"},
+        headers=auth,
+    )
+
+    request = route.calls[0].request
+    assert str(request.url) == f"{PRODUCTION_HOST}/3/device/{DEVICE_TOKEN}"
+    apns_headers = {
+        name: value for name, value in request.headers.items() if name.startswith("apns-")
+    }
+    assert apns_headers == {
+        "apns-topic": BUNDLE_ID,
+        "apns-push-type": "alert",
+        "apns-priority": "10",
+        "apns-expiration": "0",
+        "apns-collapse-id": "req-7",
+    }
+    assert request.headers["authorization"].startswith("bearer ")
+    assert request.headers["content-type"] == "application/json"
+    assert request.content == (
+        b'{"aps":{"alert":{"title":"The End of Oak Street (2026)",'
+        b'"body":"Requested by Robin Example"},"sound":"default"}}'
+    )
+
+
+@respx.mock
+async def test_push_still_treats_bad_device_token_as_unregistered(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    """Only /v1/liveactivity reports it as failed; /v1/push is unchanged."""
+    _apns_route().mock(return_value=httpx.Response(400, json={"reason": "BadDeviceToken"}))
+
+    response = await client.post("/v1/push", json=PUSH, headers=auth)
+
+    assert response.json()["result"] == "unregistered"
+    assert response.json()["reason"] == "BadDeviceToken"
+
+
+@respx.mock
+async def test_push_ignores_the_live_activity_topics(
+    credentials: ApnsCredentials, auth: dict[str, str]
+) -> None:
+    """The allow-list governs /v1/liveactivity only; /v1/push needs no entry."""
+    _apns_route().mock(return_value=httpx.Response(200))
+    settings = Settings(
+        apns=credentials,
+        signing_secret=SIGNING_SECRET,
+        live_activity_topics=frozenset({("someone-else", "com.example.Other")}),
+    )
+    app = create_app(settings=settings)
+
+    async with LifespanManager(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://relay"
+        ) as client:
+            response = await client.post("/v1/push", json=PUSH, headers=auth)
+
+    assert response.json()["result"] == "delivered"

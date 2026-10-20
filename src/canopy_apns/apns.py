@@ -55,6 +55,16 @@ PROVIDER_TOKEN_LIFETIME_SECONDS = 45 * 60
 #: sent to production).  Both are permanent for the token as presented.
 DEAD_TOKEN_REASONS = frozenset({"Unregistered", "BadDeviceToken", "DeviceTokenNotForTopic"})
 
+#: The same, for Live Activity pushes — minus ``BadDeviceToken``.  An activity
+#: token is short-lived and its caller is usually juggling sandbox and
+#: production builds, so a ``BadDeviceToken`` here is far more often an
+#: environment mismatch than a dead token; reporting it as ``unregistered``
+#: would tell the caller to delete a token that works against the other host.
+LIVE_ACTIVITY_DEAD_TOKEN_REASONS = frozenset({"Unregistered", "DeviceTokenNotForTopic"})
+
+#: Appended to the app's bundle id to form a Live Activity push's topic.
+LIVE_ACTIVITY_TOPIC_SUFFIX = ".push-type.liveactivity"
+
 #: Statuses worth one more attempt.  429 is Apple throttling, 500 and 503 are
 #: Apple having a bad moment; everything else is a request we got wrong and
 #: would get wrong again.
@@ -264,6 +274,70 @@ def build_payload(
     return payload
 
 
+def build_live_activity_payload(
+    *,
+    event: str,
+    timestamp: int,
+    content_state: dict[str, Any],
+    attributes_type: str | None = None,
+    attributes: dict[str, Any] | None = None,
+    alert: dict[str, str] | None = None,
+    stale_date: int | None = None,
+    dismissal_date: int | None = None,
+    relevance_score: float | None = None,
+) -> dict[str, Any]:
+    """The APNs JSON body for one Live Activity start, update or end.
+
+    Unlike :func:`build_payload`, the caller's ``content_state`` and
+    ``attributes`` go *inside* ``aps`` — that is where ActivityKit reads them,
+    and they are decoded into the app's own ``ContentState`` and attributes
+    types, so the relay cannot own their shape.  What it still owns is every
+    other key: an instance cannot reach ``content-available``, ``sound`` or
+    anything else through this endpoint, only the fields named here.
+
+    The snake_case request fields become Apple's hyphenated keys.  Optional
+    fields are omitted rather than sent as ``null``, which ActivityKit would
+    read as a value.
+    """
+    aps: dict[str, Any] = {
+        "timestamp": timestamp,
+        "event": event,
+        "content-state": content_state,
+    }
+    if attributes_type is not None:
+        aps["attributes-type"] = attributes_type
+    if attributes is not None:
+        aps["attributes"] = attributes
+    if alert is not None:
+        aps["alert"] = alert
+    if stale_date is not None:
+        aps["stale-date"] = stale_date
+    if dismissal_date is not None:
+        aps["dismissal-date"] = dismissal_date
+    if relevance_score is not None:
+        aps["relevance-score"] = relevance_score
+    return {"aps": aps}
+
+
+def encoded_payload_size(payload: dict[str, Any]) -> int:
+    """The size in bytes of ``payload`` as it goes on the wire.
+
+    Encoded exactly as ``httpx`` encodes a ``json=`` body — compact separators,
+    UTF-8 rather than ``\\u`` escapes — so the number checked against Apple's
+    limit is the number Apple sees.  A test pins the two together.
+    """
+    return len(
+        json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    )
+
+
+def live_activity_topic(bundle_id: str) -> str:
+    """The ``apns-topic`` for a Live Activity push to ``bundle_id``'s app."""
+    return f"{bundle_id}{LIVE_ACTIVITY_TOPIC_SUFFIX}"
+
+
 class ApnsClient:
     """Sends one notification to one device token.
 
@@ -301,17 +375,87 @@ class ApnsClient:
         environment: str = "production",
         collapse_id: str | None = None,
     ) -> SendResult:
-        """Push to one device, retrying once where it helps.
+        """Push one alert to one device, to the relay's own bundle id.
+
+        What ``/v1/push`` sends, and nothing about it is the caller's choice
+        beyond the text: see :func:`build_payload` for the body and
+        :meth:`deliver` for the retry.
+        """
+        payload = build_payload(title=title, body=body, badge=badge, data=data)
+        return await self.deliver(
+            device_token=device_token,
+            payload=payload,
+            environment=environment,
+            push_type="alert",
+            topic=self.credentials.bundle_id,
+            # 10 = deliver now. These are user-visible alerts about something
+            # that just happened; there is nothing to coalesce or defer.
+            priority=10,
+            # 0 = do not store and retry. A notification about a request filed
+            # ten minutes ago is not worth waking a phone for later.
+            expiration=0,
+            collapse_id=collapse_id,
+        )
+
+    async def send_live_activity(
+        self,
+        *,
+        device_token: str,
+        payload: dict[str, Any],
+        bundle_id: str,
+        environment: str = "production",
+        priority: int = 10,
+        expiration: int = 0,
+    ) -> SendResult:
+        """Push one Live Activity start, update or end to one token.
+
+        ``payload`` is from :func:`build_live_activity_payload`, built by the
+        caller so it can check the size first.  ``bundle_id`` names the app;
+        the topic suffix is added here, so whether a caller is *allowed* that
+        app is the caller's question, not this one's.
+        """
+        return await self.deliver(
+            device_token=device_token,
+            payload=payload,
+            environment=environment,
+            push_type="liveactivity",
+            topic=live_activity_topic(bundle_id),
+            priority=priority,
+            expiration=expiration,
+            dead_token_reasons=LIVE_ACTIVITY_DEAD_TOKEN_REASONS,
+        )
+
+    async def deliver(
+        self,
+        *,
+        device_token: str,
+        payload: dict[str, Any],
+        environment: str,
+        push_type: str,
+        topic: str,
+        priority: int,
+        expiration: int,
+        collapse_id: str | None = None,
+        dead_token_reasons: frozenset[str] = DEAD_TOKEN_REASONS,
+    ) -> SendResult:
+        """Push ``payload`` to one device, retrying once where it helps.
 
         One retry, not a loop: the two things worth retrying are a stale
         provider token (mint a new one, try again) and Apple throttling or
         faulting (try again). Anything still failing after that is either our
         bug or Apple being down, and hammering it helps neither.
         """
-        payload = build_payload(title=title, body=body, badge=badge, data=data)
         url = f"{self._host(environment)}/3/device/{device_token}"
+        headers = {
+            "apns-topic": topic,
+            "apns-push-type": push_type,
+            "apns-priority": str(priority),
+            "apns-expiration": str(expiration),
+        }
+        if collapse_id is not None:
+            headers["apns-collapse-id"] = collapse_id
 
-        result = await self._attempt(url, payload, collapse_id=collapse_id)
+        result = await self._attempt(url, payload, headers, dead_token_reasons)
 
         should_retry = result.status_code in RETRYABLE_STATUSES or (
             result.status_code == 403 and result.reason == EXPIRED_TOKEN_REASON
@@ -319,26 +463,23 @@ class ApnsClient:
         if result.outcome is SendOutcome.FAILED and should_retry:
             if result.reason == EXPIRED_TOKEN_REASON:
                 self._tokens.invalidate(self.credentials)
-            result = await self._attempt(url, payload, collapse_id=collapse_id)
+            result = await self._attempt(url, payload, headers, dead_token_reasons)
 
         return result
 
     async def _attempt(
-        self, url: str, payload: dict[str, Any], *, collapse_id: str | None
+        self,
+        url: str,
+        payload: dict[str, Any],
+        push_headers: dict[str, str],
+        dead_token_reasons: frozenset[str],
     ) -> SendResult:
+        # Authorization first and re-read per attempt, so a retry after an
+        # expired provider token carries the freshly minted one.
         headers = {
             "authorization": f"bearer {self._tokens.get(self.credentials)}",
-            "apns-topic": self.credentials.bundle_id,
-            "apns-push-type": "alert",
-            # 10 = deliver now. These are user-visible alerts about something
-            # that just happened; there is nothing to coalesce or defer.
-            "apns-priority": "10",
-            # 0 = do not store and retry. A notification about a request filed
-            # ten minutes ago is not worth waking a phone for later.
-            "apns-expiration": "0",
+            **push_headers,
         }
-        if collapse_id is not None:
-            headers["apns-collapse-id"] = collapse_id
 
         try:
             response = await self._client.post(url, json=payload, headers=headers)
@@ -353,7 +494,7 @@ class ApnsClient:
             )
 
         reason = _reason_of(response)
-        if response.status_code == 410 or reason in DEAD_TOKEN_REASONS:
+        if response.status_code == 410 or reason in dead_token_reasons:
             return SendResult(
                 outcome=SendOutcome.UNREGISTERED,
                 status_code=response.status_code,
@@ -386,6 +527,8 @@ def _reason_of(response: httpx.Response) -> str | None:
 
 
 __all__ = [
+    "LIVE_ACTIVITY_DEAD_TOKEN_REASONS",
+    "LIVE_ACTIVITY_TOPIC_SUFFIX",
     "PRODUCTION_HOST",
     "SANDBOX_HOST",
     "ApnsClient",
@@ -393,7 +536,10 @@ __all__ = [
     "ProviderTokenCache",
     "SendOutcome",
     "SendResult",
+    "build_live_activity_payload",
     "build_payload",
+    "encoded_payload_size",
+    "live_activity_topic",
     "sign_provider_token",
     "validate_private_key",
 ]

@@ -60,6 +60,10 @@ services:
       # is per-instance revocation; leave empty until you need it.
       CANOPY_APNS_REVOKED_INSTANCES: ${CANOPY_APNS_REVOKED_INSTANCES:-}
 
+      # Live Activity allow-list: comma-separated <instance_id>:<bundle_id>
+      # pairs. Empty means no instance may use POST /v1/liveactivity.
+      CANOPY_APNS_LIVEACTIVITY_TOPICS: ${CANOPY_APNS_LIVEACTIVITY_TOPICS:-}
+
       # Per-instance ceiling, so one misconfigured instance cannot spend the
       # operator's standing with Apple. Counted per replica, in memory.
       CANOPY_APNS_RATE_LIMIT: ${CANOPY_APNS_RATE_LIMIT:-120}

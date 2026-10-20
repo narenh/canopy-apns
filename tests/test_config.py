@@ -208,3 +208,70 @@ def test_a_nonsense_enrollment_flag_is_a_startup_error(
 
     with pytest.raises(ConfigError):
         load_settings()
+
+
+# ---------------------------------------------------------------------------
+# Live Activity topics
+# ---------------------------------------------------------------------------
+
+
+def test_live_activity_topics_default_to_nobody(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CANOPY_APNS_SIGNING_SECRET", SECRET)
+    monkeypatch.delenv("CANOPY_APNS_LIVEACTIVITY_TOPICS", raising=False)
+
+    settings = load_settings()
+    assert settings.live_activity_topics == frozenset()
+    assert not settings.may_push_live_activity("acme", "com.example.App")
+
+
+def test_live_activity_topics_are_parsed_into_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CANOPY_APNS_SIGNING_SECRET", SECRET)
+    monkeypatch.setenv(
+        "CANOPY_APNS_LIVEACTIVITY_TOPICS",
+        " A1B2C3 : com.canopysf.CanopyControl , ,acme:com.example.App ",
+    )
+
+    settings = load_settings()
+    assert settings.live_activity_topics == frozenset(
+        {("a1b2c3", "com.canopysf.CanopyControl"), ("acme", "com.example.App")}
+    )
+    # Instance ids are lowercased like verify() produces them; bundle ids are exact.
+    assert settings.may_push_live_activity("a1b2c3", "com.canopysf.CanopyControl")
+    assert not settings.may_push_live_activity("a1b2c3", "com.canopysf.canopycontrol")
+    # A pair is a pair: acme gets its own bundle, not a1b2c3's.
+    assert not settings.may_push_live_activity("acme", "com.canopysf.CanopyControl")
+
+
+def test_one_instance_may_have_several_bundles(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CANOPY_APNS_SIGNING_SECRET", SECRET)
+    monkeypatch.setenv(
+        "CANOPY_APNS_LIVEACTIVITY_TOPICS", "acme:com.example.One,acme:com.example.Two"
+    )
+
+    settings = load_settings()
+    assert settings.may_push_live_activity("acme", "com.example.One")
+    assert settings.may_push_live_activity("acme", "com.example.Two")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "com.example.App",  # no instance id
+        "acme:",  # no bundle id
+        ":com.example.App",
+        "acme_1:com.example.App",  # not a valid instance id
+        "acme:com.example.App:extra",
+        "acme:notabundle",
+    ],
+)
+def test_a_malformed_live_activity_topic_stops_startup(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """Skipping it would look exactly like the instance being refused for nothing."""
+    monkeypatch.setenv("CANOPY_APNS_SIGNING_SECRET", SECRET)
+    monkeypatch.setenv("CANOPY_APNS_LIVEACTIVITY_TOPICS", value)
+
+    with pytest.raises(ConfigError, match="CANOPY_APNS_LIVEACTIVITY_TOPICS"):
+        load_settings()

@@ -14,9 +14,16 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
-from .config import MAX_BODY_LENGTH, MAX_DATA_BYTES, MAX_TITLE_LENGTH
+from .config import BUNDLE_ID_PATTERN, MAX_BODY_LENGTH, MAX_DATA_BYTES, MAX_TITLE_LENGTH
 
 
 class PushRequest(BaseModel):
@@ -100,6 +107,109 @@ class PushRequest(BaseModel):
                 f"data is {len(encoded)} bytes; the limit is {MAX_DATA_BYTES}"
             )
         return value
+
+
+class LiveActivityAlert(BaseModel):
+    """The alert a Live Activity push may light the screen with.
+
+    Required to *start* an activity remotely — Apple will not show a new one
+    without it — and optional on an update or end, where it turns a silent
+    refresh into a visible one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=MAX_TITLE_LENGTH)
+    body: str = Field(max_length=MAX_BODY_LENGTH)
+
+
+class LiveActivityRequest(BaseModel):
+    """``POST /v1/liveactivity`` — one start, update or end for one token.
+
+    Closer to an APNs payload than :class:`PushRequest`, because ActivityKit
+    decodes ``content_state`` and ``attributes`` into the app's own Swift types
+    and the relay cannot know their shape.  Everything else is still named and
+    typed here; see :func:`canopy_apns.apns.build_live_activity_payload` for
+    how each field lands in ``aps``.
+
+    ``bundle_id`` is per request, unlike ``/v1/push``, which is why an instance
+    may only name one the operator has paired with it in
+    ``CANOPY_APNS_LIVEACTIVITY_TOPICS``.  That check is in the endpoint, not
+    here: it needs the authenticated instance.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    device_token: str = Field(min_length=1, max_length=200, pattern=r"^[0-9a-fA-F]+$")
+    """Hex, validated exactly as ``/v1/push`` does: an activity's push token
+    (update, end) or the app's push-to-start token (start). Never stored."""
+
+    environment: Literal["sandbox", "production"] = "production"
+
+    bundle_id: str = Field(min_length=1, max_length=155, pattern=BUNDLE_ID_PATTERN)
+    """The app's bundle id, without the ``.push-type.liveactivity`` suffix —
+    the relay adds that to form the topic."""
+
+    event: Literal["start", "update", "end"]
+
+    content_state: dict[str, Any]
+    """The activity's ``ContentState``, as the app's Codable type expects it."""
+
+    attributes_type: str | None = Field(default=None, min_length=1, max_length=200)
+    """The Swift ``ActivityAttributes`` type name. Start only."""
+
+    attributes: dict[str, Any] | None = None
+    """The static attributes the activity is created with. Start only; ``{}``
+    is a valid value for attributes with no stored properties."""
+
+    alert: LiveActivityAlert | None = None
+
+    timestamp: int | None = Field(default=None, ge=0)
+    """Unix seconds. ActivityKit discards an update older than the last one it
+    applied, so a caller sending out of order should set this; the relay
+    otherwise stamps the time it forwarded."""
+
+    stale_date: int | None = Field(default=None, ge=0)
+    dismissal_date: int | None = Field(default=None, ge=0)
+    """End only: when the system removes the ended activity."""
+
+    relevance_score: float | None = None
+    """Orders the activity among the app's others. NaN and Infinity are
+    refused by the endpoint, not here: FastAPI's validation 422 echoes the
+    input and cannot render a NaN, so refusing it here would be a 500."""
+
+    priority: Literal[5, 10] = 10
+    """10 is delivered immediately; 5 lets Apple deliver opportunistically.
+    iOS budgets how many priority-10 updates an activity gets, so a caller
+    sending frequent updates should send most of them at 5."""
+
+    expiration: int = Field(default=0, ge=0)
+    """Unix seconds until which Apple keeps retrying; 0 means try once."""
+
+    @model_validator(mode="after")
+    def _event_fields(self) -> LiveActivityRequest:
+        # "Required iff start" in both directions: a start without them cannot
+        # create anything, and sent on an update they would be silently ignored
+        # by ActivityKit — the very mismatch extra="forbid" exists to surface.
+        start_only = {
+            "attributes_type": self.attributes_type,
+            "attributes": self.attributes,
+        }
+        if self.event == "start":
+            missing = [name for name, value in start_only.items() if value is None]
+            if self.alert is None:
+                missing.append("alert")
+            if missing:
+                raise ValueError(f"a start event requires {', '.join(missing)}")
+        else:
+            present = [name for name, value in start_only.items() if value is not None]
+            if present:
+                raise ValueError(
+                    f"{', '.join(present)} may only be sent with a start event"
+                )
+        if self.dismissal_date is not None and self.event != "end":
+            raise ValueError("dismissal_date may only be sent with an end event")
+        return self
 
 
 class PushResponse(BaseModel):
@@ -188,6 +298,8 @@ __all__ = [
     "EnrollResponse",
     "ErrorResponse",
     "HealthResponse",
+    "LiveActivityAlert",
+    "LiveActivityRequest",
     "PushRequest",
     "PushResponse",
     "VerifyResponse",
