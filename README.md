@@ -1,6 +1,7 @@
 # canopy-apns
 
-A public APNs forwarder for self-hosted Canopy+ instances.
+A public APNs forwarder for self-hosted Canopy+ instances, running as a
+Cloudflare Worker at `apns.canopysf.com`.
 
 One Apple Developer account owns the app, so one signing key can push to it.
 That key cannot be handed out — it signs notifications for every app on the
@@ -8,7 +9,13 @@ team — but every self-hoster still needs to send pushes. This service is the
 resolution: it holds the key, and instances hand it `(device token, two lines
 of text)` over an authenticated HTTP call.
 
-It stores nothing. No database, no volume, no queue, no device tokens.
+It stores no device tokens, no notification text, and no keys. The only state
+is a rate-limit counter per instance and per enrolling address, which deletes
+itself after an hour idle.
+
+It used to be a Python/FastAPI container on Coolify. It moved to Workers so a
+push no longer depends on a home network being up; the HTTP contract, the key
+format and every existing instance key are unchanged.
 
 ---
 
@@ -19,7 +26,7 @@ It stores nothing. No database, no volume, no queue, no device tokens.
 - [API](#api)
 - [Instance API keys](#instance-api-keys) — including self-service enrollment
 - [Configuration](#configuration)
-- [Deploying on Coolify](#deploying-on-coolify) — including [checking TLS from a browser](#checking-tls-and-the-proxy-from-a-browser)
+- [Deploying](#deploying) — including [the cutover from Coolify](#cutting-over-from-coolify)
 - [Privacy: what the relay operator can see](#privacy-what-the-relay-operator-can-see)
 - [Development](#development)
 
@@ -83,14 +90,15 @@ mechanism.
 
 **Does**
 
-- Holds the APNs signing key (`.p8`), team id, key id and bundle id, from the
-  environment.
+- Holds the APNs signing key (`.p8`) as a Worker secret, and the team id, key
+  id and bundle id as Worker vars.
 - Issues instance identities on demand, so no self-hoster ever handles a
   credential. Still writes nothing down.
 - Authenticates each request by instance API key, and rate-limits per instance.
 - Builds the APNs payload itself from a constrained request shape, and sets the
   push headers.
-- Signs a provider-token JWT, POSTs to Apple over HTTP/2, and reports the
+- Signs a provider-token JWT, POSTs to Apple (Cloudflare's edge speaks HTTP/2
+  to Apple on the Worker's behalf), and reports the
   outcome — including telling the instance when a device token is dead so it
   can delete it.
 
@@ -125,7 +133,11 @@ Base URL in production: `https://apns.canopysf.com`.
 | `GET /v1/verify` | Bearer | Confirm a key works; for an instance's settings page |
 | `POST /v1/push` | Bearer | Forward one notification to one device |
 | `POST /v1/liveactivity` | Bearer | Forward one Live Activity start, update or end to one token; allow-listed per instance |
-| `GET /` | none | Says what this is; in a browser, [a page showing what the relay saw](#checking-tls-and-the-proxy-from-a-browser) |
+| `GET /` | none | Says what this is; a browser gets a small status page |
+
+Every non-2xx body is `{"detail": "<one sentence>"}` — including a 422, whose
+`detail` was a list of pydantic errors before the move to Workers and is now
+one sentence naming the field.
 
 Authentication is `Authorization: Bearer <instance-api-key>`. Every rejection is
 the same flat 401 with the same message, whether the key was malformed, forged,
@@ -209,7 +221,7 @@ relay's own problems, so a caller can read the status code and know whether the
 | `401` | Bad, forged, or revoked API key |
 | `422` | The request body is not a shape the relay will send |
 | `429` | Over this instance's rate limit; `Retry-After` says how long |
-| `503` | The relay has no usable signing key. Not the instance's fault |
+| `503` | The relay has no usable signing key, or is misconfigured. Not the instance's fault |
 
 That split matters most for `unregistered`. The relay stores no device tokens,
 so it cannot delete a dead one — only the instance can, and burying that answer
@@ -385,20 +397,16 @@ What holds the line instead:
 
 Turning enrollment off does not disturb instances already holding a key.
 
-Per-address limiting needs the app to see the real client rather than the proxy
-in front of it, so uvicorn is run with proxy headers trusted and
-`CANOPY_APNS_FORWARDED_ALLOW_IPS` defaults to `*`. That is correct while the
-container is only reachable through Coolify's proxy — which `expose` (rather
-than `ports`) ensures. If you ever publish the port directly, narrow it to the
-proxy's address, or a client can claim any address it likes and get a fresh
-bucket per request.
+Per-address limiting keys on `CF-Connecting-IP`, which Cloudflare sets to the
+real client and which no caller can forge — the `X-Forwarded-For` trust setting
+the Docker deployment needed is gone.
 
 ### Issuing one by hand
 
 Still supported, for a stable id you choose:
 
 ```console
-$ python -m canopy_apns mint acme
+$ CANOPY_APNS_SIGNING_SECRET=… npm run mint -- acme
 canopy_acme_k3jd7q2mfhx4zt8bwv6nra5cyp
 ```
 
@@ -416,46 +424,50 @@ without a lookup. The id is an identifier; the signature is the secret part.
 | One instance | Add its id to `CANOPY_APNS_REVOKED_INSTANCES` | That key 401s; everyone else unaffected |
 | Everything | Rotate `CANOPY_APNS_SIGNING_SECRET` | Every key ever issued 401s; instances re-enrol |
 
-Both are redeploys. A derived key cannot be un-derived, which is the price of
+Both are a `npm run deploy` (or a `wrangler secret put`). A derived key cannot be un-derived, which is the price of
 having no persistence at all.
 
 ---
 
 ## Configuration
 
-Everything is an environment variable. There is no config file and no admin UI,
-because there is no storage for either to write to.
+Two secrets, set with `wrangler secret put` and never written to a file:
 
-| Variable | Required | Default | What it is |
-|---|---|---|---|
-| `CANOPY_APNS_SIGNING_SECRET` | **yes** | — | HMAC secret behind every instance API key. `python -m canopy_apns secret` generates one |
-| `CANOPY_APNS_TEAM_ID` | for pushing | — | Apple Developer team id, ten characters |
-| `CANOPY_APNS_KEY_ID` | for pushing | — | The push key's id; also in the filename `AuthKey_ABC123DEFG.p8` |
-| `CANOPY_APNS_BUNDLE_ID` | for pushing | — | The app's bundle id, sent as the APNs topic |
-| `CANOPY_APNS_PRIVATE_KEY` | for pushing | — | The `.p8` contents |
-| `CANOPY_APNS_PRIVATE_KEY_FILE` | — | — | Path to a mounted `.p8`, instead of the above |
-| `CANOPY_APNS_REVOKED_INSTANCES` | — | empty | Comma-separated instance ids to refuse |
-| `CANOPY_APNS_LIVEACTIVITY_TOPICS` | — | empty | `<instance_id>:<bundle_id>` pairs allowed on `/v1/liveactivity`; empty means nobody. See [below](#live-activity-topics) |
-| `CANOPY_APNS_RATE_LIMIT` | — | `120` | Pushes per minute per instance |
-| `CANOPY_APNS_RATE_BURST` | — | `30` | Bucket capacity, i.e. how large a burst is tolerated |
-| `CANOPY_APNS_ENROLLMENT_ENABLED` | — | `true` | Whether `POST /v1/instances` issues keys |
-| `CANOPY_APNS_ENROLLMENT_PER_HOUR` | — | `10` | Enrollments per hour per source address |
-| `CANOPY_APNS_ENROLLMENT_BURST` | — | `5` | How many may be bunched together |
-| `CANOPY_APNS_FORWARDED_ALLOW_IPS` | — | `*` | Whose `X-Forwarded-For` to trust when identifying the client |
-| `CANOPY_APNS_HOST` | — | `0.0.0.0` | Bind address |
-| `CANOPY_APNS_PORT` | — | `9247` | Bind port |
-| `CANOPY_APNS_LOG_LEVEL` | — | `info` | uvicorn log level |
+| Secret | What it is |
+|---|---|
+| `CANOPY_APNS_SIGNING_SECRET` | HMAC secret behind every instance API key. `npm run secret` generates one. **Must be the same value the relay has always run with**, or every existing instance key stops verifying |
+| `CANOPY_APNS_PRIVATE_KEY` | The `.p8` contents (verbatim, with literal `\n`, or base64 of the whole file) |
 
-**A missing signing secret stops startup** — without it no API key can be
-verified and every request would 401 anyway, so failing with one sentence beats
-serving nothing but rejections.
+Everything else is a var in [`wrangler.jsonc`](wrangler.jsonc), committed,
+because none of it is secret:
 
-**A missing APNs key does not.** The service starts, serves `/health` reporting
-`"apns": "unconfigured"`, tells instances so on `/v1/verify`, and refuses pushes
-with a 503 that says whose problem it is. A fresh deployment waiting on its
-`.p8` is a supported state, not a crash loop.
+| Var | Default | What it is |
+|---|---|---|
+| `CANOPY_APNS_TEAM_ID` | — | Apple Developer team id, ten characters |
+| `CANOPY_APNS_KEY_ID` | — | The push key's id; also in the filename `AuthKey_ABC123DEFG.p8` |
+| `CANOPY_APNS_BUNDLE_ID` | — | The app's bundle id, sent as the APNs topic for `/v1/push` |
+| `CANOPY_APNS_REVOKED_INSTANCES` | empty | Comma-separated instance ids to refuse |
+| `CANOPY_APNS_LIVEACTIVITY_TOPICS` | empty | `<instance_id>:<bundle_id>` pairs allowed on `/v1/liveactivity`; empty means nobody. See [below](#live-activity-topics) |
+| `CANOPY_APNS_RATE_LIMIT` | `120` | Pushes per minute per instance |
+| `CANOPY_APNS_RATE_BURST` | `30` | Bucket capacity, i.e. how large a burst is tolerated |
+| `CANOPY_APNS_ENROLLMENT_ENABLED` | `true` | Whether `POST /v1/instances` issues keys |
+| `CANOPY_APNS_ENROLLMENT_PER_HOUR` | `10` | Enrollments per hour per source address |
+| `CANOPY_APNS_ENROLLMENT_BURST` | `5` | How many may be bunched together |
+
+A Worker has no startup to fail, so what the container used to refuse to boot
+with is a **503 on every endpoint, `/health` included**, carrying the reason:
+a missing signing secret; one that contains whitespace, matches known
+boilerplate, or is shorter than 32 characters; a non-numeric limit; a malformed
+allow-list entry. `/health` also imports the `.p8`, so a mis-pasted key shows
+up there rather than as pushes quietly failing.
+
+**A missing APNs key is not an error.** `/health` reports
+`"apns": "unconfigured"`, `/v1/verify` says `ready: false`, and pushes are
+refused with a 503 that says whose problem it is. Three of the four APNs values
+counts as unconfigured, deliberately.
 
 ### Live Activity topics
+
 
 `/v1/push` can only ever reach the relay's own `CANOPY_APNS_BUNDLE_ID`.
 `/v1/liveactivity` names its bundle per request, and the relay's key signs for
@@ -471,8 +483,9 @@ CANOPY_APNS_LIVEACTIVITY_TOPICS=a1b2c3:com.canopysf.CanopyControl,acme:com.examp
   `instance` on `/v1/verify`), compared lowercased. The bundle id is compared
   exactly and is written **without** the `.push-type.liveactivity` suffix.
 - Empty or unset: every `/v1/liveactivity` request is a 403.
-- A malformed entry stops startup with a message naming it, rather than being
-  skipped — a dropped pair would look exactly like a refusal for no reason.
+- A malformed entry makes every endpoint answer 503 with a message naming it,
+  rather than being skipped — a dropped pair would look exactly like a refusal
+  for no reason.
 - A pair for a revoked instance does nothing; revocation is checked first.
 
 **The `.p8` must be valid for the Live Activity app's team.** The relay signs
@@ -485,122 +498,94 @@ created restricted to specific topics or to one environment rather than
 team-wide, check that it covers the new app and the environments its tokens
 come from.
 
-### Pasting the `.p8`
-
-A PEM file is multi-line and most secret-variable editors are not. All three
-shapes are accepted, so whichever survived the paste works:
-
-- the PEM verbatim, real newlines and all;
-- the PEM with literal `\n` where the newlines were;
-- base64 of the whole file.
-
-Whether the result is a usable ES256 key is checked **at startup**, so a
-mis-pasted file is one line in the deployment log rather than something
-discovered later as notifications quietly not arriving.
-
 ### Rate limiting
 
-A token bucket per instance, in memory. Nothing is shared between replicas, so
-with N replicas an instance's effective ceiling is N times the configured one.
-That is fine: this limit exists to stop one misconfigured instance from
-hammering Apple with the operator's signing key, not to meter a paid product. A
-shared counter would mean a Redis, which would mean the relay was no longer
-stateless.
+A token bucket per instance (`push:<id>`) and per enrolling address
+(`enroll:<ip>`), each in its own [Durable Object](src/ratelimit.ts). A Worker
+has no shared memory — consecutive requests can land in different cities — so
+the bucket needs one place where reads and writes for its key are serialised.
+That makes the limit exact and global, where the container's in-memory buckets
+were per replica.
 
-Buckets for instances that have gone quiet are dropped after an hour of idleness
-— a full bucket and no bucket are indistinguishable, so forgetting one is free.
+Each bucket is one stored row (a token count and a timestamp) and an alarm
+deletes it after an hour idle, by which point it would be full anyway.
+
+### The provider token
+
+Apple wants one provider token reused for 20–60 minutes, and returns
+`TooManyProviderTokenUpdates` to a key that mints them too often. The token is
+cached per Worker isolate and renewed at 45 minutes. A Worker runs in several
+isolates at once, so unlike the single container process, a few tokens can be
+live for the same key at the same time. At this relay's volume that is a
+handful, and a `TooManyProviderTokenUpdates` is retried once like any 429. If it
+ever shows up in the logs, move the cache into a Durable Object.
 
 ---
 
-## Deploying on Coolify
+## Deploying
 
-1. **New resource → Docker Compose**, pointed at this repository. `build: .` is
-   already in `docker-compose.yml`; nothing is published to a registry.
-2. **Assign the domain** `apns.canopysf.com`. Coolify fills in
-   `SERVICE_FQDN_CANOPYAPNS_9247` and wires up its proxy and TLS certificate.
-   The compose file uses `expose`, not `ports`, so the container is reachable
-   only through that proxy.
-3. **Set the environment variables** in Coolify. [`.env.example`](.env.example)
-   is the whole list with every value blank and a note on each; Coolify's
-   variable editor takes a bulk `.env` paste, so paste it in and fill the five
-   blanks. Mark `CANOPY_APNS_SIGNING_SECRET` and `CANOPY_APNS_PRIVATE_KEY` as
-   secrets, and as build-time-hidden. Generate the signing secret once:
+Needs a Cloudflare account with `canopysf.com` on it, and `npx wrangler login`
+once on the machine you deploy from.
+
+```console
+$ npm install
+$ npx wrangler secret put CANOPY_APNS_SIGNING_SECRET   # the existing value; see below
+$ npx wrangler secret put CANOPY_APNS_PRIVATE_KEY < AuthKey_9C88D929Z5.p8
+$ npm run deploy
+$ curl https://cfapns.canopysf.com/health
+{"status":"ok","apns":"configured"}
+```
+
+Changing a var is an edit to `wrangler.jsonc` and a deploy; vars set in the
+dashboard are overwritten by the file on every deploy, so set them here.
+Changing a secret is `wrangler secret put` (or the dashboard), which takes
+effect immediately and survives deploys.
+
+With Workers Builds connected to this repo, a push to the connected branch
+deploys. The Worker's name in the dashboard has to match `name` in
+`wrangler.jsonc` (`canopy-apns`).
+
+Logs are in the Cloudflare dashboard under the Worker's **Observability** tab
+(`"observability"` is on in `wrangler.jsonc`), or live with `npx wrangler tail`.
+They carry the instance id, environment and outcome of each push — never the
+device token or the text.
+
+### Cutting over from Coolify
+
+The DNS cutover is the only step clients notice, and they notice nothing:
+`cplus-server` and Canopy Control both just call `https://apns.canopysf.com`.
+
+1. **Run the Worker at `cfapns.canopysf.com` first**, alongside the Coolify
+   relay, with the signing secret copied from the Coolify deployment's
+   `CANOPY_APNS_SIGNING_SECRET` (production, not preview) and the same `.p8`.
+   With the same secret, every key the old relay issued verifies here —
+   `npm test` pins that against keys the Python code minted.
+2. **Send a real push through it**, because only a deployed Worker can reach
+   APNs (local `wrangler dev` on macOS cannot; see
+   [cloudflare/workerd#4841](https://github.com/cloudflare/workerd/issues/4841)).
+   Use an existing instance key and a device token you own:
 
    ```console
-   $ python -m canopy_apns secret                     # anywhere with the repo
-   $ docker compose run --rm canopy-apns secret       # or from the image
+   $ curl https://cfapns.canopysf.com/v1/push \
+       -H "Authorization: Bearer canopy_…" -H "Content-Type: application/json" \
+       -d '{"device_token":"…","environment":"production","title":"Worker test"}'
+   {"result":"delivered","reason":null,"apns_id":"…"}
    ```
 
-   It is 64 URL-safe base64 characters and it is not derived from anything, so
-   it can be generated on your laptop and pasted in; nothing about where it was
-   made matters.
+   `delivered` and a notification on the phone is the go signal. A `failed`
+   with a network-level `reason` means the edge could not reach Apple, and the
+   cutover should stop there.
+3. **Point `apns.canopysf.com` at the Worker.** In the Cloudflare dashboard,
+   delete the existing `apns` DNS record for `canopysf.com`; add
+   `{ "pattern": "apns.canopysf.com", "custom_domain": true }` to `routes` in
+   `wrangler.jsonc`; deploy. Cloudflare creates the record and the
+   certificate. The gap between deleting the record and the deploy finishing
+   is the only downtime, typically under a minute.
+4. **Check from outside**, then stop the Coolify application. Leave it stopped
+   rather than deleted for a few days, so going back is a DNS record.
 
-   **Check what actually landed in the field.** Coolify prefills environment
-   variables from the compose file, and it reads `${VAR:?message}` — compose's
-   "abort if unset" — as a *default*, so an earlier version of this repo left
-   deployments running with their signing secret set to the literal words of
-   the error message. The compose file now uses an empty default, and
-   `load_settings()` refuses a secret containing whitespace, matching known
-   boilerplate, or shorter than 32 characters. All three are startup failures:
-   a relay that will not boot is strictly better than one minting forgeable
-   keys.
-
-4. **Deploy**, then check it from outside:
-
-   ```console
-   $ curl https://apns.canopysf.com/health
-   {"status":"ok","apns":"configured"}
-
-   $ curl -X POST https://apns.canopysf.com/v1/instances
-   {"instance_id":"…","api_key":"canopy_…","bundle_id":"com.example.canopy","ready":true}
-   ```
-
-   `"apns": "unconfigured"` means one of the four APNs variables is missing or
-   blank — the service treats three-out-of-four as not configured, deliberately,
-   because three cannot send anything. If the container is up but the domain is
-   not answering at all, the problem is the proxy rather than the app, and
-   [the browser page at `/`](#checking-tls-and-the-proxy-from-a-browser) is
-   built to say which.
-5. **Nothing else.** Instances enrol themselves through `POST /v1/instances`
-   the moment their admin switches notifications on. Use
-   `python -m canopy_apns mint <id>` only if you want to hand someone a stable
-   id of their own; it works anywhere the same `CANOPY_APNS_SIGNING_SECRET` is
-   set, since the key is derived rather than looked up.
-
-There is **no volume and no `/data`**. If a redeploy loses something, it was not
-this service's.
-
-### Checking TLS and the proxy from a browser
-
-Open `https://apns.canopysf.com/` in a browser and the relay renders a
-diagnostic page instead of the JSON `curl` gets. There is still no web UI — the
-page is a mirror, and it exists because the usual deployment failure behind a
-terminating proxy is invisible from the outside.
-
-That failure: the browser speaks HTTPS, the proxy forwards over plain HTTP, and
-the app never learns the original scheme, because the proxy is not sending
-`X-Forwarded-Proto` or uvicorn is not trusting it. Everything downstream — a
-redirect loop, a link that drops to `http://`, a blocked mixed-content fetch —
-is a symptom of that one disagreement and none of them name it. So the page
-prints, side by side:
-
-- the scheme the **relay** resolved, and the scheme the **browser** actually
-  used, with a banner naming the mismatch and which direction it runs in;
-- every forwarding header as received (`X-Forwarded-Proto`, `-For`, `-Host`,
-  `-Port`, `Forwarded`, `X-Real-IP`, `Host`), including the ones that are
-  absent — a blank `X-Forwarded-Proto` is usually the whole answer;
-- the client address the relay ended up with, which is what the per-address
-  enrollment limit buckets on, so a proxy trusted wrongly shows up here too;
-- a live same-origin fetch of `/health`, which fails visibly if the browser is
-  blocking it as mixed content or the request is being redirected across
-  schemes.
-
-Links on the page are relative, so clicking `/health` or `/docs` keeps whatever
-scheme you arrived on and any redirect is the deployment's own.
-
-Nothing on the page is privileged: it reflects your own request back at you,
-plus what `/health` already says publicly. It stores nothing, and it is
-`noindex`.
+Rolling back: remove the `apns` route, deploy, recreate the old DNS record,
+start the Coolify app.
 
 ### Getting the `.p8` in the first place
 
@@ -622,12 +607,13 @@ serves them as long as the app is on the same team.
 ## Privacy: what the relay operator can see
 
 Worth being honest about, because instance admins are being asked to route
-their users' notifications through someone else's server.
+their users' notifications through someone else's server — and since the move,
+through Cloudflare's as well.
 
 **Notifications pass through the relay in plaintext.** APNs itself requires
 this — Apple has to be able to read the alert text to display it, so there is
-no end-to-end encrypted path to APNs that would let the relay forward without
-seeing the content. For the duration of one request, the relay process holds:
+no end-to-end encrypted path that would let the relay forward without seeing
+the content. For the duration of one request, the Worker holds:
 
 - the device token (a random per-device identifier, not a user identity);
 - the notification's title and body — which for Canopy+ means a media title
@@ -635,10 +621,12 @@ seeing the content. For the duration of one request, the relay process holds:
 - the instance's own `data` blob;
 - the instance id from the API key, and the source IP.
 
-**None of it is stored.** There is no database to store it in. The request logs
-record the instance id, the environment, and the outcome — deliberately not the
-device token and not the text, because a log that reconstructs what was
-forwarded is a store of exactly what this service promises not to keep.
+**None of the content is stored.** The logs record the instance id, the
+environment, and the outcome — deliberately not the device token and not the
+text. What *is* stored is the rate-limit state: a token count per instance id,
+and a token count per enrolling IP address, which is the one place an address
+persists — for at most an hour after its last enrollment attempt. Cloudflare
+runs the Worker and so is in the path of every request, as Apple already was.
 
 An instance admin who is not comfortable with that should not enable the relay.
 That is why the toggle in cplus-server is off by default and says so on its
@@ -649,34 +637,35 @@ face, rather than being on with a note in the docs.
 ## Development
 
 ```console
-$ python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-$ .venv/bin/python -m pytest
-$ .venv/bin/python -m ruff check .
+$ npm install
+$ npm test          # vitest inside workerd; Apple is mocked
+$ npm run typecheck
+$ npm run dev       # local Worker; copy .dev.vars.example to .dev.vars first
 ```
 
-Requires Python 3.12+.
+Requires Node 22.18+ (the CLI scripts run TypeScript directly).
 
-The test suite generates its own P-256 key per session rather than checking one
-in — a committed private key is a committed private key even when it is only
-ever used against a mocked host — and mocks Apple with `respx`, so nothing
-reaches the network.
+The test suite generates its own P-256 key per run rather than checking one in,
+verifies the provider-token signature it produces, and pins the instance-key
+derivation against keys minted by the Python relay.
 
 ### Layout
 
 ```
-src/canopy_apns/
-  config.py      environment in, one frozen Settings out
-  keys.py        derived instance API keys; the reason there is no database
-  apns.py        provider-token signing and the HTTP/2 push
-  ratelimit.py   a token bucket per instance
-  schemas.py     the wire contract, extra="forbid" throughout
-  landing.py     the browser page at /: what the relay saw of your request
-  app.py         the endpoints
-  __main__.py    serve | secret | mint
+src/
+  index.ts       the endpoints
+  config.ts      Worker env in, one Settings out
+  keys.ts        derived instance API keys; the reason there is no database
+  apns.ts        provider-token signing and the push to Apple
+  ratelimit.ts   the RateLimiter Durable Object: one token bucket per key
+  validate.ts    the wire contract, unknown fields refused throughout
+  landing.ts     the page a browser gets at /
+scripts/cli.ts   npm run secret | npm run mint -- <id>
 ```
 
 ### The client side
 
 `cplus-server` is the reference client. Its `notify/relay.py` is the whole of
 what talking to this service takes: one POST per device, a `Bearer` header, and
-deleting a device row when the result comes back `unregistered`.
+deleting a device row when the result comes back `unregistered`. Canopy
+Control's `live_push.py` does the same for `/v1/liveactivity`.

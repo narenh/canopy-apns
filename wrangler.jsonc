@@ -1,0 +1,34 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "canopy-apns",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-10-01",
+	"observability": { "enabled": true },
+
+	"workers_dev": false,
+
+	// cfapns runs alongside the Coolify relay at apns.canopysf.com until the
+	// cutover. Then: delete the old apns DNS record, add
+	// { "pattern": "apns.canopysf.com", "custom_domain": true } here, deploy.
+	"routes": [{ "pattern": "cfapns.canopysf.com", "custom_domain": true }],
+
+	"durable_objects": {
+		"bindings": [{ "name": "RATE_LIMITER", "class_name": "RateLimiter" }]
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["RateLimiter"] }],
+
+	// Non-secret settings. The secrets — CANOPY_APNS_SIGNING_SECRET and
+	// CANOPY_APNS_PRIVATE_KEY — go in with `wrangler secret put`, never here.
+	"vars": {
+		"CANOPY_APNS_TEAM_ID": "UC3Y84QJ83",
+		"CANOPY_APNS_KEY_ID": "9C88D929Z5",
+		"CANOPY_APNS_BUNDLE_ID": "com.canopysf.Canopy-Seerr",
+		"CANOPY_APNS_REVOKED_INSTANCES": "",
+		"CANOPY_APNS_LIVEACTIVITY_TOPICS": "xpp27isxjjhbd3yueg5q:com.canopysf.CanopyControl",
+		"CANOPY_APNS_RATE_LIMIT": "120",
+		"CANOPY_APNS_RATE_BURST": "30",
+		"CANOPY_APNS_ENROLLMENT_ENABLED": "true",
+		"CANOPY_APNS_ENROLLMENT_PER_HOUR": "10",
+		"CANOPY_APNS_ENROLLMENT_BURST": "5"
+	}
+}

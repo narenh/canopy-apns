@@ -1,0 +1,8 @@
+# Secrets for `npm run dev`. Copy to .dev.vars (gitignored) and fill in.
+# In production these are `wrangler secret put <NAME>`, never a file.
+#
+# Note: APNs only answers HTTP/2, and local `wrangler dev` on macOS cannot
+# reach it (cloudflare/workerd#4841). Locally you can enroll, verify and see
+# validation; a real push needs the deployed Worker.
+CANOPY_APNS_SIGNING_SECRET=
+CANOPY_APNS_PRIVATE_KEY=
