@@ -7,10 +7,9 @@
 
 	"workers_dev": false,
 
-	// cfapns runs alongside the Coolify relay at apns.canopysf.com until the
-	// cutover. Then: delete the old apns DNS record, add
-	// { "pattern": "apns.canopysf.com", "custom_domain": true } here, deploy.
-	"routes": [{ "pattern": "cfapns.canopysf.com", "custom_domain": true }],
+	// The one address clients use. Builds deploy from this file, so a domain
+	// added only in the dashboard would drift from it.
+	"routes": [{ "pattern": "apns.canopysf.com", "custom_domain": true }],
 
 	"durable_objects": {
 		"bindings": [{ "name": "RATE_LIMITER", "class_name": "RateLimiter" }]
