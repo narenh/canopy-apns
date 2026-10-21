@@ -15,7 +15,9 @@ itself after an hour idle.
 
 It used to be a Python/FastAPI container on Coolify. It moved to Workers so a
 push no longer depends on a home network being up; the HTTP contract, the key
-format and every existing instance key are unchanged.
+format and every existing instance key are unchanged. The last version that
+ran on Coolify is the tag [`coolify-final`](https://github.com/narenh/canopy-apns/tree/coolify-final)
+(`da50184`).
 
 ---
 
