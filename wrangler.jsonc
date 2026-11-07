@@ -24,6 +24,7 @@
 		"CANOPY_APNS_BUNDLE_ID": "com.canopysf.Canopy-Seerr",
 		"CANOPY_APNS_REVOKED_INSTANCES": "",
 		"CANOPY_APNS_LIVEACTIVITY_TOPICS": "xpp27isxjjhbd3yueg5q:com.canopysf.CanopyControl",
+		"CANOPY_APNS_PUSH_TOPICS": "wfa5cwgg3u2pzlkoff2a:com.canopysf.Canoparr",
 		"CANOPY_APNS_RATE_LIMIT": "120",
 		"CANOPY_APNS_RATE_BURST": "30",
 		"CANOPY_APNS_ENROLLMENT_ENABLED": "true",

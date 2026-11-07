@@ -24,6 +24,7 @@ export interface Env {
 	CANOPY_APNS_PRIVATE_KEY?: string;
 	CANOPY_APNS_REVOKED_INSTANCES?: string;
 	CANOPY_APNS_LIVEACTIVITY_TOPICS?: string;
+	CANOPY_APNS_PUSH_TOPICS?: string;
 	CANOPY_APNS_RATE_LIMIT?: string | number;
 	CANOPY_APNS_RATE_BURST?: string | number;
 	CANOPY_APNS_ENROLLMENT_ENABLED?: string | boolean;
@@ -79,6 +80,11 @@ export interface Settings {
 	enrollmentBurst: number;
 	/** `"<instance_id>:<bundle_id>"` strings allowed on `/v1/liveactivity`. */
 	liveActivityTopics: ReadonlySet<string>;
+	/**
+	 * `"<instance_id>:<bundle_id>"` strings an instance may name as `bundle_id`
+	 * on `/v1/push`, for apps other than the default `CANOPY_APNS_BUNDLE_ID`.
+	 */
+	pushTopics: ReadonlySet<string>;
 }
 
 function clean(value: unknown): string {
@@ -130,6 +136,15 @@ export function normalisePrivateKey(raw: string): string {
 
 /** `CANOPY_APNS_LIVEACTIVITY_TOPICS` into `instance:bundle` strings. */
 export function parseLiveActivityTopics(raw: string): Set<string> {
+	return parseTopics(raw, "CANOPY_APNS_LIVEACTIVITY_TOPICS");
+}
+
+/** `CANOPY_APNS_PUSH_TOPICS` into `instance:bundle` strings. */
+export function parsePushTopics(raw: string): Set<string> {
+	return parseTopics(raw, "CANOPY_APNS_PUSH_TOPICS");
+}
+
+function parseTopics(raw: string, name: string): Set<string> {
 	const pairs = new Set<string>();
 	for (const part of raw.split(",")) {
 		const entry = part.trim();
@@ -139,7 +154,7 @@ export function parseLiveActivityTopics(raw: string): Set<string> {
 		const bundleId = sep < 0 ? "" : entry.slice(sep + 1).trim();
 		if (sep < 0 || !INSTANCE_ID_PATTERN.test(instanceId) || !BUNDLE_ID_PATTERN.test(bundleId)) {
 			throw new ConfigError(
-				"CANOPY_APNS_LIVEACTIVITY_TOPICS must be a comma-separated list of " +
+				`${name} must be a comma-separated list of ` +
 					"<instance_id>:<bundle_id> pairs, e.g. `a1b2c3:com.example.App`; " +
 					`could not read ${JSON.stringify(entry)}.`,
 			);
@@ -237,5 +252,6 @@ export function loadSettings(env: Env): Settings {
 			DEFAULT_ENROLLMENT_BURST,
 		),
 		liveActivityTopics: parseLiveActivityTopics(clean(env.CANOPY_APNS_LIVEACTIVITY_TOPICS)),
+		pushTopics: parsePushTopics(clean(env.CANOPY_APNS_PUSH_TOPICS)),
 	};
 }

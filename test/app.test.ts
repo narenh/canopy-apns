@@ -307,3 +307,87 @@ it("exports nothing from the main module but handlers and classes", async () => 
 		expect(typeof value === "function" || name === "default", name).toBe(true);
 	}
 });
+
+describe("POST /v1/push to another app, and the optional alert fields", () => {
+	it("refuses a bundle id this instance is not paired with, before spending budget", async () => {
+		const calls = mockApple(ok);
+		const { key } = await freshKey();
+		const r = await call("/v1/push", { method: "POST", key, json: push({ bundle_id: "com.example.other" }) });
+		expect(r.status).toBe(403);
+		expect((await r.json()).detail).toContain("CANOPY_APNS_PUSH_TOPICS");
+		expect(calls).toHaveLength(0);
+	});
+
+	it("sends to a paired bundle id, on the sandbox host when asked", async () => {
+		const calls = mockApple(ok);
+		const { id, key } = await freshKey();
+		const e = makeEnv({ CANOPY_APNS_PUSH_TOPICS: `${id}:com.example.other` });
+		const r = await call(
+			"/v1/push",
+			{ method: "POST", key, json: push({ bundle_id: "com.example.other", environment: "sandbox" }) },
+			e,
+		);
+		expect(r.status).toBe(200);
+		expect(calls[0]?.url).toBe(`https://api.sandbox.push.apple.com/3/device/${TOKEN}`);
+		expect(calls[0]?.headers["apns-topic"]).toBe("com.example.other");
+	});
+
+	it("accepts the default bundle id named explicitly without an allow-list entry", async () => {
+		const calls = mockApple(ok);
+		const { key } = await freshKey();
+		const r = await call("/v1/push", { method: "POST", key, json: push({ bundle_id: BUNDLE }) });
+		expect(r.status).toBe(200);
+		expect(calls[0]?.headers["apns-topic"]).toBe(BUNDLE);
+	});
+
+	it("maps thread, interruption level, category, silence and expiration", async () => {
+		const calls = mockApple(ok);
+		const { key } = await freshKey();
+		await call("/v1/push", {
+			method: "POST",
+			key,
+			json: push({
+				thread_id: "show:106",
+				interruption_level: "time-sensitive",
+				category: "decision",
+				sound: "none",
+				expiration: 1900000000,
+				data: { url: "/shows/106", notification_id: "7" },
+			}),
+		});
+		expect(calls[0]?.body).toEqual({
+			aps: {
+				alert: { title: "The End of Oak Street (2026)", body: "Requested by Robin" },
+				"thread-id": "show:106",
+				"interruption-level": "time-sensitive",
+				category: "decision",
+			},
+			canopy: { url: "/shows/106", notification_id: "7" },
+		});
+		expect(calls[0]?.headers).toMatchObject({ "apns-expiration": "1900000000", "apns-priority": "10" });
+	});
+
+	it("sends a passive push at priority 5", async () => {
+		const calls = mockApple(ok);
+		const { key } = await freshKey();
+		await call("/v1/push", { method: "POST", key, json: push({ interruption_level: "passive" }) });
+		expect(calls[0]?.headers["apns-priority"]).toBe("5");
+		expect(calls[0]?.body).toMatchObject({ aps: { "interruption-level": "passive", sound: "default" } });
+	});
+
+	it("refuses bad optional fields", async () => {
+		mockApple(ok);
+		const { key } = await freshKey();
+		for (const bad of [
+			{ interruption_level: "critical" },
+			{ sound: "chime.caf" },
+			{ category: "has space" },
+			{ bundle_id: "nodots" },
+			{ expiration: -1 },
+			{ collapse_id: "é".repeat(40) },
+		]) {
+			const r = await call("/v1/push", { method: "POST", key, json: push(bad) });
+			expect(r.status, JSON.stringify(bad)).toBe(422);
+		}
+	});
+});

@@ -156,7 +156,13 @@ and one who is probing should not be told.
   "body": "Requested by Robin Example",   // `subtitle` also accepted; see below
   "badge": 3,                         // optional; omit to leave the icon alone
   "data": { "imdb_id": "tt1234567" }, // optional, opaque, ≤1KB
-  "collapse_id": "req-7"              // optional
+  "collapse_id": "req-7",             // optional; ≤64 bytes
+  "bundle_id": "com.example.other",   // optional; another app, see below
+  "thread_id": "show:106",            // optional; groups notifications
+  "interruption_level": "active",     // optional; "passive" | "active" | "time-sensitive"
+  "category": "decision",             // optional; the app's notification category
+  "sound": "default",                 // optional; "default" (the default) or "none"
+  "expiration": 0                     // optional; unix seconds Apple may hold it until
 }
 ```
 
@@ -175,6 +181,20 @@ Becomes, at Apple:
 
 with `apns-push-type: alert`, `apns-priority: 10`, `apns-expiration: 0` and
 `apns-topic` set to the relay's configured bundle id.
+
+The optional alert fields map onto `aps` as `thread-id`, `interruption-level`
+and `category`; `sound: "none"` leaves `aps.sound` out. A `passive` push goes
+at `apns-priority: 5`. `expiration` (unix seconds) becomes `apns-expiration`,
+so Apple holds the push for a device that is offline until then; the default
+`0` means deliver now or never. Each field is omitted when absent, so a
+client that sends none of them produces the same payload as before.
+
+**`bundle_id` names another app.** Without it, the topic is
+`CANOPY_APNS_BUNDLE_ID`, as always. With it, the instance must be paired with
+that bundle id in `CANOPY_APNS_PUSH_TOPICS` (`<instance_id>:<bundle_id>`,
+comma-separated, the same format as `CANOPY_APNS_LIVEACTIVITY_TOPICS`), or the
+push is a 403 naming the entry to add, and no budget is spent. Naming the
+default bundle id explicitly needs no entry.
 
 **`badge` is optional and absent by default.** APNs has no increment — you
 send an absolute number and the last one wins — so the count has to be computed
@@ -221,6 +241,7 @@ relay's own problems, so a caller can read the status code and know whether the
 |---|---|
 | `200` | Forwarded. Read `result` for what Apple said |
 | `401` | Bad, forged, or revoked API key |
+| `403` | `bundle_id` names an app this instance is not paired with in `CANOPY_APNS_PUSH_TOPICS` |
 | `422` | The request body is not a shape the relay will send |
 | `429` | Over this instance's rate limit; `Retry-After` says how long |
 | `503` | The relay has no usable signing key, or is misconfigured. Not the instance's fault |
@@ -450,6 +471,7 @@ because none of it is secret:
 | `CANOPY_APNS_BUNDLE_ID` | — | The app's bundle id, sent as the APNs topic for `/v1/push` |
 | `CANOPY_APNS_REVOKED_INSTANCES` | empty | Comma-separated instance ids to refuse |
 | `CANOPY_APNS_LIVEACTIVITY_TOPICS` | empty | `<instance_id>:<bundle_id>` pairs allowed on `/v1/liveactivity`; empty means nobody. See [below](#live-activity-topics) |
+| `CANOPY_APNS_PUSH_TOPICS` | empty | `<instance_id>:<bundle_id>` pairs an instance may name as `bundle_id` on `/v1/push`, for apps other than `CANOPY_APNS_BUNDLE_ID` |
 | `CANOPY_APNS_RATE_LIMIT` | `120` | Pushes per minute per instance |
 | `CANOPY_APNS_RATE_BURST` | `30` | Bucket capacity, i.e. how large a burst is tolerated |
 | `CANOPY_APNS_ENROLLMENT_ENABLED` | `true` | Whether `POST /v1/instances` issues keys |

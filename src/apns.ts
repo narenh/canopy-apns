@@ -169,11 +169,19 @@ export function buildPayload(p: {
 	body: string | null;
 	badge: number | null;
 	data: Record<string, unknown> | null;
+	threadId?: string | null;
+	interruptionLevel?: string | null;
+	category?: string | null;
+	sound?: boolean;
 }): Record<string, unknown> {
 	const alert: Record<string, unknown> = { title: p.title };
 	if (p.body) alert.body = p.body;
-	const aps: Record<string, unknown> = { alert, sound: "default" };
+	const aps: Record<string, unknown> = { alert };
+	if (p.sound !== false) aps.sound = "default";
 	if (p.badge !== null) aps.badge = p.badge;
+	if (p.threadId) aps["thread-id"] = p.threadId;
+	if (p.interruptionLevel) aps["interruption-level"] = p.interruptionLevel;
+	if (p.category) aps.category = p.category;
 	const payload: Record<string, unknown> = { aps };
 	if (p.data && Object.keys(p.data).length > 0) payload.canopy = p.data;
 	return payload;

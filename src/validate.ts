@@ -86,7 +86,16 @@ export interface PushRequest {
 	badge: number | null;
 	data: Json | null;
 	collapseId: string | null;
+	bundleId: string | null;
+	threadId: string | null;
+	interruptionLevel: InterruptionLevel | null;
+	category: string | null;
+	sound: boolean;
+	expiration: number;
 }
+
+export type InterruptionLevel = "passive" | "active" | "time-sensitive";
+const INTERRUPTION_LEVELS: readonly string[] = ["passive", "active", "time-sensitive"];
 
 /**
  * `POST /v1/push`. Deliberately not an APNs payload — text in, alert out.
@@ -97,7 +106,22 @@ export interface PushRequest {
  */
 export function parsePush(raw: unknown): PushRequest {
 	if (!isObject(raw)) throw new Invalid("The request body must be a JSON object.");
-	only(raw, ["device_token", "environment", "title", "body", "subtitle", "badge", "data", "collapse_id"]);
+	only(raw, [
+		"device_token",
+		"environment",
+		"title",
+		"body",
+		"subtitle",
+		"badge",
+		"data",
+		"collapse_id",
+		"bundle_id",
+		"thread_id",
+		"interruption_level",
+		"category",
+		"sound",
+		"expiration",
+	]);
 	if (raw.body !== undefined && raw.subtitle !== undefined) {
 		throw new Invalid("Send body or subtitle, not both; subtitle is the old name for body.");
 	}
@@ -109,6 +133,19 @@ export function parsePush(raw: unknown): PushRequest {
 		if (size > MAX_DATA_BYTES) throw new Invalid(`data is ${size} bytes; the limit is ${MAX_DATA_BYTES}.`);
 	}
 
+	const level = raw.interruption_level;
+	if (level !== undefined && level !== null && !(typeof level === "string" && INTERRUPTION_LEVELS.includes(level))) {
+		throw new Invalid('interruption_level must be "passive", "active" or "time-sensitive".');
+	}
+	const sound = raw.sound;
+	if (sound !== undefined && sound !== null && sound !== "default" && sound !== "none") {
+		throw new Invalid('sound must be "default" or "none".');
+	}
+	const collapseId = string(raw, "collapse_id", { max: 64 });
+	if (collapseId !== null && new TextEncoder().encode(collapseId).byteLength > 64) {
+		throw new Invalid("collapse_id must be at most 64 bytes.");
+	}
+
 	return {
 		deviceToken: string(raw, "device_token", { required: true, max: 200, pattern: DEVICE_TOKEN }) as string,
 		environment: environment(raw),
@@ -116,9 +153,17 @@ export function parsePush(raw: unknown): PushRequest {
 		body: string(raw, bodyField, { max: MAX_BODY_LENGTH }),
 		badge: integer(raw, "badge", { min: 0 }),
 		data,
-		collapseId: string(raw, "collapse_id", { max: 64 }),
+		collapseId,
+		bundleId: string(raw, "bundle_id", { min: 1, max: 155, pattern: BUNDLE_ID_PATTERN }),
+		threadId: string(raw, "thread_id", { min: 1, max: 64 }),
+		interruptionLevel: (level as InterruptionLevel | null | undefined) ?? null,
+		category: string(raw, "category", { min: 1, max: 64, pattern: CATEGORY }),
+		sound: sound !== "none",
+		expiration: integer(raw, "expiration", { min: 0 }) ?? 0,
 	};
 }
+
+const CATEGORY = /^[A-Za-z0-9_.-]+$/;
 
 export interface LiveActivityRequest {
 	deviceToken: string;

@@ -210,8 +210,19 @@ async function verifyKey(request: Request, settings: Settings): Promise<Response
 async function push(request: Request, env: Env, settings: Settings): Promise<Response> {
 	const instance = await authenticate(request, settings);
 	const notification = parsePush(await readJson(request));
-	await spendPushBudget(env, settings, instance);
 	const credentials = requireCredentials(settings);
+	// Another app than the relay's default: only one the operator paired with
+	// this instance. Checked before any budget is spent, like Live Activities.
+	const topic = notification.bundleId ?? credentials.bundleId;
+	if (topic !== credentials.bundleId && !settings.pushTopics.has(`${instance.id}:${topic}`)) {
+		log({ msg: "refused a push", instance: instance.id, bundle: topic });
+		throw new HttpError(
+			403,
+			`Instance ${instance.id} may not send pushes to ${topic}. The relay operator has to add ` +
+				`\`${instance.id}:${topic}\` to CANOPY_APNS_PUSH_TOPICS.`,
+		);
+	}
+	await spendPushBudget(env, settings, instance);
 
 	const result = await send(() =>
 		deliver(credentials, {
@@ -219,11 +230,13 @@ async function push(request: Request, env: Env, settings: Settings): Promise<Res
 			payload: buildPayload(notification),
 			environment: notification.environment,
 			pushType: "alert",
-			topic: credentials.bundleId,
-			// Deliver now, and do not store-and-retry: a notification about
-			// something that happened ten minutes ago is not worth a late wake.
-			priority: 10,
-			expiration: 0,
+			topic,
+			// Deliver now. By default Apple doesn't store-and-retry: a
+			// notification about something that happened ten minutes ago is not
+			// worth a late wake. A caller can ask Apple to hold it until
+			// `expiration` (unix seconds) for a device that is offline.
+			priority: notification.interruptionLevel === "passive" ? 5 : 10,
+			expiration: notification.expiration,
 			collapseId: notification.collapseId,
 		}),
 	);
@@ -233,6 +246,7 @@ async function push(request: Request, env: Env, settings: Settings): Promise<Res
 		msg: "push",
 		instance: instance.id,
 		env: notification.environment,
+		bundle: topic,
 		result: result.result,
 		reason: result.reason,
 	});
