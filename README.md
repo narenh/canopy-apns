@@ -153,7 +153,7 @@ and one who is probing should not be told.
   "device_token": "a1b2…",           // hex, as Apple issues it
   "environment": "production",        // or "sandbox"; a property of the token
   "title": "The End of Oak Street (2026)",
-  "body": "Requested by Robin Example",   // `subtitle` also accepted; see below
+  "body": "Requested by Robin Example",   // ≤1000 chars; `subtitle` also accepted; see below
   "badge": 3,                         // optional; omit to leave the icon alone
   "data": { "imdb_id": "tt1234567" }, // optional, opaque, ≤1KB
   "collapse_id": "req-7",             // optional; ≤64 bytes

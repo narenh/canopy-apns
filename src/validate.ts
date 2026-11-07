@@ -7,7 +7,13 @@
  * `{"detail": "<one sentence>"}`, which is what both clients read.
  */
 
-import { BUNDLE_ID_PATTERN, MAX_BODY_LENGTH, MAX_DATA_BYTES, MAX_TITLE_LENGTH } from "./config.ts";
+import {
+	BUNDLE_ID_PATTERN,
+	MAX_BODY_LENGTH,
+	MAX_DATA_BYTES,
+	MAX_PUSH_BODY_LENGTH,
+	MAX_TITLE_LENGTH,
+} from "./config.ts";
 import type { Environment } from "./apns.ts";
 
 export class Invalid extends Error {}
@@ -150,7 +156,7 @@ export function parsePush(raw: unknown): PushRequest {
 		deviceToken: string(raw, "device_token", { required: true, max: 200, pattern: DEVICE_TOKEN }) as string,
 		environment: environment(raw),
 		title: string(raw, "title", { required: true, min: 1, max: MAX_TITLE_LENGTH }) as string,
-		body: string(raw, bodyField, { max: MAX_BODY_LENGTH }),
+		body: string(raw, bodyField, { max: MAX_PUSH_BODY_LENGTH }),
 		badge: integer(raw, "badge", { min: 0 }),
 		data,
 		collapseId,

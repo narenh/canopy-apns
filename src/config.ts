@@ -44,6 +44,8 @@ export const DEFAULT_ENROLLMENT_BURST = 5;
  */
 export const MAX_TITLE_LENGTH = 200;
 export const MAX_BODY_LENGTH = 200;
+/** A push's body may run longer (a release name, what replaced what); APNs still caps the whole payload at 4KB. */
+export const MAX_PUSH_BODY_LENGTH = 1000;
 export const MAX_DATA_BYTES = 1024;
 
 /** Apple's cap on a Live Activity push, measured on the whole encoded payload. */

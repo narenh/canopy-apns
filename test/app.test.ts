@@ -375,6 +375,14 @@ describe("POST /v1/push to another app, and the optional alert fields", () => {
 		expect(calls[0]?.body).toMatchObject({ aps: { "interruption-level": "passive", sound: "default" } });
 	});
 
+	it("takes a body up to 1000 characters", async () => {
+		const calls = mockApple(ok);
+		const { key } = await freshKey();
+		expect((await call("/v1/push", { method: "POST", key, json: push({ body: "x".repeat(1000) }) })).status).toBe(200);
+		expect((await call("/v1/push", { method: "POST", key, json: push({ body: "x".repeat(1001) }) })).status).toBe(422);
+		expect(calls).toHaveLength(1);
+	});
+
 	it("refuses bad optional fields", async () => {
 		mockApple(ok);
 		const { key } = await freshKey();
