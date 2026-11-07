@@ -88,6 +88,8 @@ export interface PushRequest {
 	deviceToken: string;
 	environment: Environment;
 	title: string;
+	/** `aps.alert.subtitle`: the bold line under the title. */
+	alertSubtitle: string | null;
 	body: string | null;
 	badge: number | null;
 	data: Json | null;
@@ -108,7 +110,8 @@ const INTERRUPTION_LEVELS: readonly string[] = ["passive", "active", "time-sensi
  *
  * `subtitle` is accepted as an alias for `body`: the field was renamed when it
  * turned out iOS bolds subtitles, and a client not yet redeployed still sends
- * the old name. Sending both is refused rather than guessed at.
+ * the old name. Sending both is refused rather than guessed at. The bold line
+ * under the title is `alert_subtitle` (`aps.alert.subtitle`), its own field.
  */
 export function parsePush(raw: unknown): PushRequest {
 	if (!isObject(raw)) throw new Invalid("The request body must be a JSON object.");
@@ -118,6 +121,7 @@ export function parsePush(raw: unknown): PushRequest {
 		"title",
 		"body",
 		"subtitle",
+		"alert_subtitle",
 		"badge",
 		"data",
 		"collapse_id",
@@ -156,6 +160,7 @@ export function parsePush(raw: unknown): PushRequest {
 		deviceToken: string(raw, "device_token", { required: true, max: 200, pattern: DEVICE_TOKEN }) as string,
 		environment: environment(raw),
 		title: string(raw, "title", { required: true, min: 1, max: MAX_TITLE_LENGTH }) as string,
+		alertSubtitle: string(raw, "alert_subtitle", { max: MAX_ALERT_SUBTITLE_LENGTH }),
 		body: string(raw, bodyField, { max: MAX_PUSH_BODY_LENGTH }),
 		badge: integer(raw, "badge", { min: 0 }),
 		data,
@@ -170,6 +175,7 @@ export function parsePush(raw: unknown): PushRequest {
 }
 
 const CATEGORY = /^[A-Za-z0-9_.-]+$/;
+export const MAX_ALERT_SUBTITLE_LENGTH = 200;
 
 export interface LiveActivityRequest {
 	deviceToken: string;

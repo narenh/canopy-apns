@@ -153,6 +153,7 @@ and one who is probing should not be told.
   "device_token": "a1b2…",           // hex, as Apple issues it
   "environment": "production",        // or "sandbox"; a property of the token
   "title": "The End of Oak Street (2026)",
+  "alert_subtitle": "↓ Downloading", // optional, ≤200 chars; the bold line under the title
   "body": "Requested by Robin Example",   // ≤1000 chars; `subtitle` also accepted; see below
   "badge": 3,                         // optional; omit to leave the icon alone
   "data": { "imdb_id": "tt1234567" }, // optional, opaque, ≤1KB
@@ -224,6 +225,11 @@ rest put the sender in `title` and the content in `body`; the relay now does
 the same. `subtitle` stays accepted as an alias for `body`, because the schema
 forbids unknown fields and the two services deploy separately — dropping the
 old name would 422 every push from a client that has not been redeployed yet.
+
+A caller that does want the bold line under the title sends it as
+`alert_subtitle`, which becomes `aps.alert.subtitle` (≤200 chars, omitted when
+absent). It is a separate field so the old `subtitle` alias keeps meaning
+`body`.
 
 The response:
 

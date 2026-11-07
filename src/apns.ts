@@ -161,11 +161,12 @@ export function resetProviderTokens(): void {
 /**
  * The APNs body for one alert. Built here rather than forwarded, so no
  * instance can reach into `aps` and send a silent background wake under the
- * operator's key. The second line is `body`, which iOS renders in regular
- * weight; `badge` is tested against null because 0 clears the icon.
+ * operator's key. `alertSubtitle` is the bold line under the title; `body`
+ * is iOS's regular-weight text; `badge` is tested against null because 0 clears the icon.
  */
 export function buildPayload(p: {
 	title: string;
+	alertSubtitle?: string | null;
 	body: string | null;
 	badge: number | null;
 	data: Record<string, unknown> | null;
@@ -175,6 +176,7 @@ export function buildPayload(p: {
 	sound?: boolean;
 }): Record<string, unknown> {
 	const alert: Record<string, unknown> = { title: p.title };
+	if (p.alertSubtitle) alert.subtitle = p.alertSubtitle;
 	if (p.body) alert.body = p.body;
 	const aps: Record<string, unknown> = { alert };
 	if (p.sound !== false) aps.sound = "default";

@@ -134,6 +134,17 @@ describe("POST /v1/push", () => {
 		expect(r.status).toBe(422);
 	});
 
+	it("sends alert_subtitle as the alert's subtitle, and omits it when absent", async () => {
+		const calls = mockApple(ok);
+		const { key } = await freshKey();
+		await call("/v1/push", { method: "POST", key, json: push({ alert_subtitle: "↓ Downloading" }) });
+		expect(calls[0]?.body).toMatchObject({ aps: { alert: { subtitle: "↓ Downloading" } } });
+		await call("/v1/push", { method: "POST", key, json: push() });
+		expect((calls[1]?.body as { aps: { alert: Record<string, unknown> } }).aps.alert.subtitle).toBeUndefined();
+		const long = await call("/v1/push", { method: "POST", key, json: push({ alert_subtitle: "x".repeat(201) }) });
+		expect(long.status).toBe(422);
+	});
+
 	it("forwards badges, including 0, and omits an absent one", async () => {
 		const calls = mockApple(ok);
 		const { key } = await freshKey();
